@@ -1,0 +1,411 @@
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+import numpy as np
+from sklearn.ensemble import IsolationForest
+import boto3
+from datetime import datetime
+import json
+class ComplianceCheck:
+    def __init__(self):
+        #  GDPR requirements
+        self.gdpr_requirements = {
+            "data_encryption": "Ensure all data is encrypted at rest and in transit, using strong encryption standards.",
+            "access_control": "Restrict access to sensitive data based on the principle of least privilege, ensure multi-factor authentication (MFA) for critical actions.",
+            "breach_notifications": "Detect and report data breaches within 72 hours, ensure incident response plans are in place for quick response.",
+            "data_minimization": "Ensure only the necessary data is collected and stored, adhering to the data minimization principle.",
+            "consent_management": "Ensure proper consent is obtained for collecting personal data and that users can easily withdraw consent.",
+            "data_retention": "Ensure data retention policies are in place, and data is deleted after it is no longer necessary for its original purpose.",
+            "audit_trail": "Maintain an audit trail of all data processing activities for accountability, especially when personal data is accessed or modified.",
+            "data_subject_rights": "Ensure that data subjects' rights (e.g., right to access, right to rectification, right to erasure) are respected."
+        }
+
+        # NIS2 requirements
+        self.nis2_requirements = {
+            "incident_reporting": "Track and report incidents to regulatory bodies within predefined timeframes (e.g., 24 hours for high-severity incidents).",
+            "vulnerability_management": "Implement an ongoing vulnerability management program to identify, assess, and patch vulnerabilities within defined timeframes (e.g., 14 days for critical vulnerabilities).",
+            "critical_infra_protection": "Protect critical cloud resources (e.g., computing, storage) from unauthorized access, ensuring strict access controls and protection against DDoS attacks.",
+            "network_security": "Implement robust network security measures, including firewalls, intrusion detection systems (IDS), and intrusion prevention systems (IPS).",
+            "business_continuity_planning": "Establish business continuity and disaster recovery plans, ensuring regular testing and compliance with recovery time objectives (RTO).",
+            "access_management": "Implement strong access management, including role-based access control (RBAC), privileged access management (PAM), and logging of all access attempts to critical resources.",
+            "supplier_management": "Ensure that third-party suppliers comply with NIS2 requirements and manage the risks associated with external dependencies.",
+            "monitoring_and_detection": "Implement continuous monitoring and detection of cybersecurity threats, using tools like Security Information and Event Management (SIEM) systems to identify unusual activity."
+        }
+
+    def check_gdpr_compliance(self, event):
+        """Check GDPR compliance based on the event data."""
+        violations = []
+        
+        # Check for encryption (GDPR requirement)
+        if not event.get('encrypted', False):
+            violations.append(self.gdpr_requirements['data_encryption'])
+        
+        # Access control violation if the event is from an unknown user
+        if event.get('Username') == 'Unknown':
+            violations.append(self.gdpr_requirements['access_control'])
+
+        # Data minimization - Ensure the event doesn't involve excessive data collection
+        if event.get('EventName') in ["LaunchInstance", "TerminateInstances"] and len(event.get('CloudTrailEvent', {}).get('data', [])) > 5:
+            violations.append(self.gdpr_requirements['data_minimization'])
+
+        # Consent management - This is just a basic check, assuming that the event needs consent information
+        if 'consent' not in event.get('CloudTrailEvent', {}):
+            violations.append(self.gdpr_requirements['consent_management'])
+
+        # Check if data retention policies are followed (e.g., deleting data after use)
+        if event.get('EventName') == 'DeleteObject' and 'no_retention_policy' in event.get('CloudTrailEvent', {}):
+            violations.append(self.gdpr_requirements['data_retention'])
+
+        # Audit trail - Event should log all changes to sensitive data
+        if event.get('EventName') in ['ModifyUser', 'CreateUser', 'DeleteUser']:
+            if 'audit_trail' not in event.get('CloudTrailEvent', {}):
+                violations.append(self.gdpr_requirements['audit_trail'])
+
+        # Data subject rights - Rights to erasure or access not respected
+        if event.get('EventName') == 'DeleteBucket' and 'no_erasure' in event.get('CloudTrailEvent', {}):
+            violations.append(self.gdpr_requirements['data_subject_rights'])
+
+        return violations
+
+    def check_nis2_compliance(self, event):
+        """Check NIS2 compliance based on the event data."""
+        violations = []
+        
+        # Incident reporting - Check for incidents related to critical infrastructure
+        if event.get('EventName') in ["StopInstances", "DeleteBucket", "ModifyNetworkAcl"]:
+            violations.append(self.nis2_requirements['incident_reporting'])
+
+        # Vulnerability management - Check if critical vulnerabilities are not patched
+        if event.get('EventName') in ["LaunchInstance", "StopInstances"] and 'critical_vuln' in event.get('CloudTrailEvent', {}):
+            violations.append(self.nis2_requirements['vulnerability_management'])
+
+        # Critical infrastructure protection - Protecting resources from unauthorized access
+        if event.get('EventName') in ['StopInstances', 'DeleteBucket']:
+            violations.append(self.nis2_requirements['critical_infra_protection'])
+
+        # Network security - Ensure network security measures are in place
+        if event.get('EventName') in ['ModifySecurityGroup', 'CreateSecurityGroup']:
+            if 'firewall_rules' not in event.get('CloudTrailEvent', {}):
+                violations.append(self.nis2_requirements['network_security'])
+
+        # Business continuity planning - Ensure disaster recovery measures are planned
+        if event.get('EventName') == 'StopInstances' and 'no_recovery_plan' in event.get('CloudTrailEvent', {}):
+            violations.append(self.nis2_requirements['business_continuity_planning'])
+
+        # Access management - Role-based access control (RBAC) checks
+        if event.get('EventName') == 'AttachRolePolicy' and 'role_based_access' not in event.get('CloudTrailEvent', {}):
+            violations.append(self.nis2_requirements['access_management'])
+
+        # Supplier management - If third-party services are involved in the event
+        if event.get('EventName') == 'InvokeLambda' and 'third_party' in event.get('CloudTrailEvent', {}):
+            violations.append(self.nis2_requirements['supplier_management'])
+
+        # Monitoring and detection - Check if there's no monitoring of critical resources
+        if event.get('EventName') == 'ModifyInstance' and 'no_monitoring' in event.get('CloudTrailEvent', {}):
+            violations.append(self.nis2_requirements['monitoring_and_detection'])
+
+        return violations
+
+    def check_all_compliance(self, event):
+        """Check both GDPR and NIS2 compliance based on the event data."""
+        violations = []
+        violations.extend(self.check_gdpr_compliance(event))
+        violations.extend(self.check_nis2_compliance(event))
+        return violations
+
+class CloudTrailAnalyzer:
+    def __init__(self):
+        self.cloudtrail = boto3.client('cloudtrail')
+        self.unauthorized_api_calls = {"DeleteBucket", "StopInstances", "DetachPolicy"}  # Example unauthorized API calls
+
+    def collect_logs(self):
+        """Collect CloudTrail logs."""
+        events = []
+        try:
+            response = self.cloudtrail.lookup_events(MaxResults=50)
+            events.extend(response.get('Events', []))
+            while 'NextToken' in response:
+                response = self.cloudtrail.lookup_events(MaxResults=50, NextToken=response['NextToken'])
+                events.extend(response.get('Events', []))
+            print(f"Collected {len(events)} CloudTrail events.")
+        except Exception as e:
+            print(f"Error collecting CloudTrail logs: {e}")
+        return events
+
+    def preprocess_logs(self, events):
+        """Preprocess logs and extract key features."""
+        data = []
+        for event in events:
+            cloudtrail_event = event.get('CloudTrailEvent', '{}')
+            try:
+                event_data = json.loads(cloudtrail_event)
+            except json.JSONDecodeError:
+                event_data = {}
+            data.append({
+                'EventName': event.get('EventName', 'Unknown'),
+                'Username': event.get('Username', 'Unknown'),
+                'SourceIPAddress': event.get('SourceIPAddress', 'Unknown'),
+                'EventTime': event.get('EventTime', None),
+                'EventID': event.get('EventId', 'Unknown'),
+                'CloudTrailEvent': event_data,
+                'UnauthorizedCall': event.get('EventName', '') in self.unauthorized_api_calls
+            })
+
+        df = pd.DataFrame(data)
+        df['EventTime'] = pd.to_datetime(df['EventTime'], errors='coerce')
+
+        # Temporal features
+        df['Hour'] = df['EventTime'].dt.hour
+        df['DayOfWeek'] = df['EventTime'].dt.dayofweek
+        df['DayOfMonth'] = df['EventTime'].dt.day
+
+        # Frequency features
+        df['EventFrequency'] = df.groupby('EventName')['EventName'].transform('count')
+        df['UserEventFrequency'] = df.groupby(['Username', 'EventName'])['EventName'].transform('count')
+        df['IPEventFrequency'] = df.groupby(['SourceIPAddress', 'EventName'])['EventName'].transform('count')
+
+        # Global thresholds
+        event_mean = df['EventFrequency'].mean()
+        event_std = df['EventFrequency'].std()
+        df['LowerThreshold'] = event_mean - 2 * event_std
+        df['UpperThreshold'] = event_mean + 2 * event_std
+
+        # Encode categorical variables
+        process_df = pd.get_dummies(
+            df.drop(['EventTime', 'EventID', 'CloudTrailEvent'], axis=1),
+            columns=['EventName', 'Username', 'SourceIPAddress'],
+            drop_first=True
+        )
+
+        # Standardize numerical features
+        numerical_columns = ['Hour', 'DayOfWeek', 'DayOfMonth', 'EventFrequency', 'UserEventFrequency', 'IPEventFrequency']
+        scaler = StandardScaler()
+        process_df[numerical_columns] = scaler.fit_transform(process_df[numerical_columns])
+
+        return process_df, df
+
+    def compute_dynamic_weights(self, df):
+        """Compute dynamic weights for risk factors."""
+        weights = {
+            'hour_weight': 10,
+            'event_frequency_weight': 25 + (df['EventFrequency'].std() / df['EventFrequency'].mean()) * 10,
+            'user_event_frequency_weight': 15 + (df['UserEventFrequency'].std() / df['UserEventFrequency'].mean()) * 5,
+            'ip_event_frequency_weight': 15 + (df['IPEventFrequency'].std() / df['IPEventFrequency'].mean()) * 5,
+        }
+        print(f"Computed weights: {weights}")
+        return weights
+
+    def calculate_risk_score(self, row, weights):
+     score = 0
+     reasons = []
+
+    # Check compliance
+     compliance_checker = ComplianceCheck()
+     compliance_violations = compliance_checker.check_all_compliance(row.to_dict())
+     if compliance_violations:
+      score += 30  # Weight for compliance violations
+      reasons.extend(compliance_violations)
+
+    # Existing risk checks
+     if row['Hour'] < 6 or row['Hour'] > 22:
+        score += weights['hour_weight']
+        reasons.append(f"Unusual time of day: {row['Hour']}")
+     if row['EventFrequency'] < row['LowerThreshold'] or row['EventFrequency'] > row['UpperThreshold']:
+        score += weights['event_frequency_weight']
+        reasons.append(f"Event {row['EventName']} has unusual frequency")
+     if row['UserEventFrequency'] < 3:
+        score += weights['user_event_frequency_weight']
+        reasons.append(f"Rare event for user: {row['Username']}")
+     if row['IPEventFrequency'] < 3:
+        score += weights['ip_event_frequency_weight']
+        reasons.append(f"Rare event from IP: {row['SourceIPAddress']}")
+     if row['UnauthorizedCall']:
+        score += 50  # High weight for unauthorized calls
+        reasons.append(f"Unauthorized API call detected: {row['EventName']}")
+
+     return score, reasons
+
+
+    def detect_anomalies(self, process_df, original_data):
+        """Detect anomalies and analyze results."""
+        if process_df.empty:
+            print("No data to process.")
+            return None, None
+
+        pca = PCA(n_components=min(6, process_df.shape[1]))
+        principal_components = pca.fit_transform(process_df)
+
+        model = IsolationForest(contamination=0.1, random_state=42)  # Adjust contamination rate
+        anomaly_labels = model.fit_predict(principal_components)
+
+        anomaly_indices = np.where(anomaly_labels == -1)[0]
+        return anomaly_indices, original_data.iloc[anomaly_indices]
+
+    def run(self):
+     events = self.collect_logs()
+     process_df, original_data = self.preprocess_logs(events)
+     weights = self.compute_dynamic_weights(original_data)
+
+     original_data['RiskScore'] = 0
+     original_data['RiskReasons'] = ''
+     original_data['ComplianceViolations'] = ''
+
+     for idx, row in original_data.iterrows():
+        score, reasons = self.calculate_risk_score(row, weights)
+        original_data.at[idx, 'RiskScore'] = score
+        original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
+        original_data.at[idx, 'ComplianceViolations'] = '; '.join(
+            ComplianceCheck().check_all_compliance(row.to_dict())
+        )
+
+     anomaly_indices, anomaly_events = self.detect_anomalies(process_df, original_data)
+
+     if anomaly_events is not None and not anomaly_events.empty:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        anomaly_events.to_csv(f'anomalies_with_compliance_{timestamp}.csv', index=False)
+        print(f"Anomalies saved to anomalies_with_compliance_{timestamp}.csv")
+     else:
+        print("No anomalies detected.")
+
+     return original_data
+ 
+import random
+import json
+from datetime import datetime, timedelta
+
+import random
+import json
+from datetime import datetime, timedelta
+
+def generate_mock_data():
+    """Generate mock CloudTrail event data with realistic events."""
+    # Realistic CloudTrail event names related to common AWS activities
+    event_names = [
+        "ListBuckets",  # Viewing the list of S3 buckets
+        "DeleteBucket",  # Deleting an S3 bucket (non-compliant action)
+        "PutObject",  # Uploading an object to an S3 bucket
+        "GetObject",  # Accessing an object from an S3 bucket
+        "CreateBucket",  # Creating a new S3 bucket
+        "StartInstances",  # Starting an EC2 instance
+        "StopInstances",  # Stopping an EC2 instance (non-compliant action)
+        "DescribeInstances",  # Describing EC2 instances
+        "AttachVolume",  # Attaching an EBS volume to an EC2 instance
+        "DetachVolume",  # Detaching an EBS volume from an EC2 instance
+        "AuthorizeSecurityGroupIngress",  # Modifying security group rules
+        "RevokeSecurityGroupIngress"  # Revoking security group rules
+    ]
+    
+    usernames = ["Alice", "Bob", "Charlie", "Eve", "Mallory"]
+    source_ips = ["192.168.1.1", "192.168.1.2", "10.0.0.1", "172.16.0.2", "203.0.113.5"]
+    base_time = datetime.now()
+
+    mock_events = []
+    for i in range(100):  # Generate 100 events
+        event_name = random.choice(event_names)
+        username = random.choice(usernames)
+        source_ip = random.choice(source_ips)
+        event_time = base_time - timedelta(minutes=random.randint(0, 1440))  # Random time in the past 24 hours
+        
+        # Simulate event parameters that might look like real CloudTrail logs
+        event_id = f"event-{i}"
+        event_source = "ec2.amazonaws.com" if event_name in ["StartInstances", "StopInstances", "DescribeInstances", "AttachVolume", "DetachVolume"] else "s3.amazonaws.com"
+        user_agent = random.choice(["aws-cli/2.0", "aws-sdk-java/1.11.842", "aws-sdk-python/1.14.0", "aws-console", "aws-sdk-go/1.34.0"])
+        request_parameters = {}
+        response_elements = {}
+        
+        # Simulate more realistic request/response elements for certain actions
+        if event_name == "PutObject":
+            request_parameters = {"bucketName": f"compliant-bucket-{random.randint(1, 10)}", "objectKey": f"data/{random.randint(1, 100)}.csv", "objectSize": random.randint(1, 10000)}
+            response_elements = {"status": "success", "objectKey": f"data/{random.randint(1, 100)}.csv"}
+        elif event_name == "GetObject":
+            request_parameters = {"bucketName": f"compliant-bucket-{random.randint(1, 10)}", "objectKey": f"data/{random.randint(1, 100)}.csv"}
+            response_elements = {"status": "success", "objectKey": f"data/{random.randint(1, 100)}.csv"}
+        elif event_name == "DeleteBucket":
+            request_parameters = {"bucketName": f"compliant-bucket-{random.randint(1, 10)}"}
+            response_elements = {"status": "failed", "reason": "Bucket contains data"}
+
+        # Compliance checks
+        unauthorized = event_name in {"DeleteBucket", "StopInstances"}  # These are actions that may violate GDPR if not properly authorized
+        
+        # Mock compliance status
+        if event_name == "DeleteBucket" or event_name == "StopInstances":
+            compliance_check = "Non-compliant"
+        else:
+            compliance_check = "Compliant"
+        
+        # Simulate breach notification for non-compliant actions
+        if event_name == "DeleteBucket":
+            breach_notification = "Violation of GDPR: Data deletion without proper consent."
+        elif event_name == "StopInstances":
+            breach_notification = "Violation of GDPR: Stopping cloud instances without due process."
+        else:
+            breach_notification = "Compliant operation."
+
+        # Append to the mock events list
+        mock_events.append({
+            "EventName": event_name,
+            "Username": username,
+            "SourceIPAddress": source_ip,
+            "EventTime": event_time.isoformat(),
+            "EventId": event_id,
+            "CloudTrailEvent": json.dumps({
+                "eventVersion": "1.08",
+                "userIdentity": {
+                    "type": "IAMUser",
+                    "userName": username
+                },
+                "eventTime": event_time.isoformat(),
+                "eventSource": event_source,
+                "eventName": event_name,
+                "awsRegion": "us-east-1",
+                "sourceIPAddress": source_ip,
+                "userAgent": user_agent,
+                "requestParameters": request_parameters,
+                "responseElements": response_elements
+            }),
+            "UnauthorizedCall": unauthorized,
+            "ComplianceCheck": compliance_check,
+            "BreachNotification": breach_notification
+        })
+
+    return mock_events
+
+
+# Mock data for testing
+mock_events = generate_mock_data()
+
+# Test the analyzer with mock data
+if __name__ == "__main__":
+    analyzer = CloudTrailAnalyzer()
+    print("Using mock data for testing...")
+
+    # Override the `collect_logs` method to use mock data
+    analyzer.collect_logs = lambda: mock_events
+
+    # Run the analyzer
+    results = analyzer.run()
+
+    # Display results
+    if results is not None:
+        print(results[['EventName', 'Username', 'SourceIPAddress', 'RiskScore', 'RiskReasons']].head())
+
+
+if __name__ == "__main__":
+    analyzer = CloudTrailAnalyzer()
+    results = analyzer.run()
+
+    # Display results with reasons for anomalies
+    if results is not None:
+        print(results[['EventName', 'Username', 'SourceIPAddress', 'RiskScore', 'RiskReasons']].head())
+
+        # Visualize Risk Categories
+        results['RiskCategory'] = results['RiskScore'].apply(
+            lambda x: "High" if x > 40 else "Medium" if x > 20 else "Low"
+        )
+        sns.countplot(data=results, x='RiskCategory', palette='viridis')
+        plt.title("Risk Category Distribution")
+        plt.xlabel("Risk Category")
+        plt.ylabel("Count")
+        plt.show()

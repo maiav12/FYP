@@ -1,0 +1,50 @@
+import boto3
+import uuid
+
+# Initialize EC2 resource
+ec2 = boto3.resource('ec2', region_name='eu-north-1')
+
+# Launch EC2 instance
+try:
+    instances = ec2.create_instances(
+        ImageId='ami-033aa18d6951dd7a2',
+        MinCount=1,
+        MaxCount=1,
+        InstanceType='t3.micro',
+        KeyName='my-key-pair2'
+    )
+    print(f'Launched EC2 instance with ID: {instances[0].id}')
+except Exception as e:
+    print(f"Failed to launch EC2 instance: {e}")
+
+# Initialize S3 client
+s3 = boto3.client('s3', region_name='eu-north-1')
+bucket_name = f"my-unique-bucket-{uuid.uuid4()}"
+
+# Create S3 bucket
+try:
+    s3.create_bucket(
+        Bucket=bucket_name,
+        CreateBucketConfiguration={'LocationConstraint': 'eu-north-1'}
+    )
+    print(f'Bucket {bucket_name} created successfully.')
+except Exception as e:
+    print(f"Failed to create S3 bucket: {e}")
+
+# Upload file to S3
+file_name = 'risk_log.txt'
+try:
+    s3.upload_file(file_name, bucket_name, file_name)
+    print(f'File {file_name} uploaded to S3 bucket: {bucket_name}')
+except Exception as e:
+    print(f"Failed to upload file: {e}")
+
+iam=boto3.client('iam')
+user=iam.create_user(UserName = 'new-user6')
+policy=iam.attach_user_policy(UserName='new-user6', PolicyArn='arn:aws:iam::aws:policy/AmazonS3FullAccess')
+print(f'User {user['UserName']} created successfully.')
+
+#create an rds instance for simulating database operations
+rds=boto3.client('rds', region_name='eu-north-1')
+response=rds.create_db_instance(DBname='mydatabase', DBInstanceIdentifier='mydbinstance4',    MasterUsername = 'admin',   MasterUserPassword = 'yourpassword', DBInstanceClass='db.t2.micro',    Engine = 'mysql', AllocatedStorage=20)
+print(f'RDS instance {response["DBInstanceIdentifier"]} created successfully.')

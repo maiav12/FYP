@@ -1,0 +1,215 @@
+import json
+import boto3
+import time
+
+class MultipleCompaniesTest:
+    def __init__(self, region_name="eu-north-1"):
+        self.ec2 = boto3.resource('ec2', region_name=region_name)
+        self.ec2_client = boto3.client('ec2', region_name=region_name)
+        self.iam = boto3.client('iam')
+        self.s3 = boto3.client('s3', region_name=region_name)
+        self.cloudtrail = boto3.client('cloudtrail', region_name=region_name)
+
+    def create_ec2_instance(self, company_name):
+        try:
+            existing_instances = self.ec2_client.describe_instances(
+                Filters=[{'Name': 'tag:Name', 'Values': [company_name]}]
+            )
+            if existing_instances['Reservations']:
+                print(f"EC2 instance already exists for {company_name}. Skipping creation.")
+                return existing_instances['Reservations'][0]['Instances'][0]['InstanceId']
+
+            instance = self.ec2.create_instances(
+                ImageId='ami-06f2889142bc3d7b3',  # Replace with a Free Tier eligible AMI ID in your region
+                InstanceType='t2.micro',  # Free Tier eligible instance type
+                MinCount=1,
+                MaxCount=1,
+                TagSpecifications=[
+                    {'ResourceType': 'instance', 'Tags': [{'Key': 'Name', 'Value': company_name}]}
+                ]
+            )[0]
+            print(f"EC2 instance created: {instance.id}")
+            return instance.id
+        except Exception as e:
+            print(f"Failed to create EC2 instance for {company_name}: {e}")
+            return None
+    def create_iam_user(self, company_name):
+        user_name = f"{company_name.lower()}-user"
+        try:
+        # Create IAM user
+            self.iam.create_user(UserName=user_name)
+            print(f"IAM user created: {user_name}")
+        
+        # Attach a policy to deny describe instances
+            deny_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Deny",
+                    "Action": "ec2:DescribeInstances",
+                    "Resource": "*"
+                }
+            ]
+        }
+            self.iam.put_user_policy(
+              UserName=user_name,
+             PolicyName="DenyDescribeEC2Instances",
+                PolicyDocument=json.dumps(deny_policy)
+             )
+            print(f"Deny DescribeInstances policy attached to {user_name}")
+        
+            return user_name
+        except self.iam.exceptions.EntityAlreadyExistsException:
+                print(f"IAM user {user_name} already exists.")
+        return user_name
+        
+
+
+    def create_s3_bucket(self, company_name):
+        bucket_name = f"{company_name.lower()}-bucket-{int(time.time())}"
+        try:
+            self.s3.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={'LocationConstraint': 'eu-north-1'}
+            )
+            print(f"S3 bucket created: {bucket_name}")
+            return bucket_name
+        except Exception as e:
+            print(f"Failed to create S3 bucket for {company_name}: {e}")
+            return None
+
+    def attach_bucket_policy(self, bucket_name, account_id):
+        bucket_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "AllowCloudTrailWrite",
+                    "Effect": "Allow",
+                    "Principal": {"Service": "cloudtrail.amazonaws.com"},
+                    "Action": "s3:PutObject",
+                    "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/{account_id}/*",
+                    "Condition": {
+                        "StringEquals": {"s3:x-amz-acl": "bucket-owner-full-control"}
+                    }
+                },
+                {
+                    "Sid": "AllowBucketReadAccess",
+                    "Effect": "Allow",
+                    "Principal": {"Service": "cloudtrail.amazonaws.com"},
+                    "Action": "s3:GetBucketAcl",
+                    "Resource": f"arn:aws:s3:::{bucket_name}"
+                },
+                {
+                    "Sid": "AllowBucketListAccess",
+                    "Effect": "Allow",
+                    "Principal": {"Service": "cloudtrail.amazonaws.com"},
+                    "Action": "s3:ListBucket",
+                    "Resource": f"arn:aws:s3:::{bucket_name}"
+                }
+            ]
+        }
+        try:
+            self.s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(bucket_policy))
+            print(f"Bucket policy attached to {bucket_name}")
+        except Exception as e:
+            print(f"Failed to attach bucket policy to {bucket_name}: {e}")
+
+    def create_shared_cloudtrail(self, bucket_name):
+        trail_name = "shared-trail"
+        try:
+            self.cloudtrail.create_trail(
+                Name=trail_name,
+                S3BucketName=bucket_name,
+                IsMultiRegionTrail=True
+            )
+            print(f"Shared CloudTrail '{trail_name}' created successfully.")
+            self.cloudtrail.start_logging(Name=trail_name)
+            print(f"Logging started for shared CloudTrail '{trail_name}'.")
+        except self.cloudtrail.exceptions.TrailAlreadyExistsException:
+            print(f"Shared CloudTrail '{trail_name}' already exists.")
+        except Exception as e:
+            print(f"Failed to create shared CloudTrail '{trail_name}': {e}")
+
+    def setup_resources_for_company(self, company_name, account_id):
+        print(f"Setting up resources for {company_name}...")
+        self.create_ec2_instance(company_name)
+        self.create_iam_user(company_name)
+        bucket_name = self.create_s3_bucket(company_name)
+        if bucket_name:
+            self.attach_bucket_policy(bucket_name, account_id)
+        return bucket_name
+
+    def simulate_actions(self, company_name, bucket_name):
+        print(f"Simulating actions for {company_name}...")
+  
+          # Simulate unauthorized bucket deletion
+        try:
+            self.s3.delete_bucket(Bucket=bucket_name)
+            print(f"Unauthorized deletion of bucket {bucket_name} succeeded (unexpected).")
+        except Exception as e:
+            print(f"Unauthorized bucket deletion simulated for {bucket_name}: {e}")
+
+        # Simulate terminating EC2 instances
+        try:
+            response = self.ec2_client.terminate_instances(
+                InstanceIds=['i-1234567890abcdef0']  # Replace with an invalid instance ID
+            )
+            print(f"Unauthorized EC2 termination response: {response}")
+        except Exception as e:
+            print(f"Unauthorized EC2 termination simulated: {e}")
+
+        # Simulate detaching an IAM policy
+        try:
+            self.iam.detach_user_policy(
+                UserName=f"{company_name.lower()}-user",
+                PolicyArn="arn:aws:iam::aws:policy/AmazonS3FullAccess"  # Example policy ARN
+            )
+            print(f"Unauthorized IAM policy detachment succeeded (unexpected).")
+        except Exception as e:
+            print(f"Unauthorized IAM policy detachment simulated: {e}")
+
+        # Simulate large data upload
+        # try:
+        #     large_data = "A" * 10**7  # 10MB data
+        #     self.s3.put_object(Bucket=bucket_name, Key='large_file.txt', Body=large_data)
+        #     print(f"Large data uploaded to {bucket_name} by {company_name}.")
+        # except Exception as e:
+        #     print(f"Large data upload simulation failed for {bucket_name}: {e}")
+
+        # Simulate frequent API calls
+        for _ in range(10):  # Burst of 10 describe instances calls
+            try:
+                response = self.ec2_client.describe_instances()
+                print(f"Frequent API call simulated: {response}")
+            except Exception as e:
+                print(f"Frequent API call simulation failed: {e}")
+
+            except Exception as e:
+                print(f"Error simulating actions for {company_name}: {e}")
+
+
+
+    def simulate_unauthorized_api_calls(self, company_name):
+        print(f"Simulating unauthorized API calls for {company_name}...")
+        try:
+            # Attempting to describe all EC2 instances without proper permissions
+            response = self.ec2_client.describe_instances()
+            print(f"Unauthorized access result for {company_name}: {response}")
+        except Exception as e:
+            print(f"Unauthorized API call simulation failed for {company_name}: {e}")
+
+
+# Main Execution
+if __name__ == "__main__":
+    account_id = "703671933126"
+    resource_setup = MultipleCompaniesTest()
+
+    # Set up resources for multiple companies
+    shared_bucket_name = resource_setup.create_s3_bucket("shared")
+    if shared_bucket_name:
+        resource_setup.create_shared_cloudtrail(shared_bucket_name)
+
+    for company in ["companyA", "companyB"]:
+        bucket_name = resource_setup.setup_resources_for_company(company, account_id)
+        if bucket_name:
+            resource_setup.simulate_actions(company, bucket_name)
