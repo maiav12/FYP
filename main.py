@@ -1,5 +1,11 @@
+
 import io
 import os
+import warnings
+from statsmodels.tsa.arima.model import ARIMA
+import statsmodels.tsa.api as smt
+import numpy as np
+import matplotlib.pyplot as plt
 import boto3
 import json
 from datetime import datetime
@@ -11,6 +17,71 @@ from services.risk_analyzer import RiskAnalyzer
 from services.compliance_checker import ComplianceChecker
 sns = boto3.client('sns')
 topic_arn = 'arn:aws:sns:eu-north-1:699475953257:cloudtrail-alerts'
+
+class RiskForecaster:
+    def __init__(self):
+        self.model = None
+
+    def train_model(self, risk_scores):
+        """Train an ARIMA model on historical risk scores."""
+        try:
+            # Convert risk scores to a Pandas Series
+            risk_series = pd.Series(risk_scores)
+
+            # Train ARIMA model (p=2, d=1, q=2)
+            self.model = ARIMA(risk_series, order=(2, 1, 2))
+            self.model = self.model.fit()
+
+            print("ARIMA model trained successfully!")
+
+        except Exception as e:
+            print(f"Error training ARIMA model: {e}")
+
+    def predict_future_risk(self, steps=10):
+        """Predict future risk scores using the trained ARIMA model."""
+        if self.model is None:
+            print("No trained model found. Please train the model first.")
+            return None
+
+        try:
+            # Forecast future risk scores
+            forecast = self.model.forecast(steps=steps)
+            return forecast
+
+        except Exception as e:
+            print(f"Error predicting future risk: {e}")
+            return None
+
+    def visualize_risk_trend(self, past_risk_scores, future_risk_scores):
+        """Plot historical risk scores and overlay predicted risk scores."""
+        try:
+            # Create time indexes
+            past_time = np.arange(len(past_risk_scores))
+            future_time = np.arange(len(past_risk_scores), len(past_risk_scores) + len(future_risk_scores))
+
+            # Plot historical risk scores
+            plt.figure(figsize=(10, 5))
+            plt.plot(past_time, past_risk_scores, label="Historical Risk Score", marker='o')
+
+            # Plot predicted future risk scores
+            plt.plot(future_time, future_risk_scores, label="Predicted Risk Score", linestyle="dashed", marker='x')
+
+            # Highlight high-risk threshold (e.g., risk > 40)
+            plt.axhline(y=40, color="red", linestyle="--", label="High-Risk Threshold")
+
+            # Labels and legend
+            plt.xlabel("Time")
+            plt.ylabel("Risk Score")
+            plt.title("Risk Score Trend (Historical vs. Predicted)")
+            plt.legend()
+            plt.grid()
+
+            # Show plot
+            plt.show()
+
+        except Exception as e:
+            print(f"Error visualizing risk trend: {e}")
+
 class CloudTrailAnalyzer:
     def __init__(self):
         self.cloudtrail = boto3.client('cloudtrail')
@@ -19,6 +90,7 @@ class CloudTrailAnalyzer:
         self.anomaly_detector = AnomalyDetector()
         self.risk_analyzer = RiskAnalyzer()
         self.compliance_checker = ComplianceChecker()
+        self.risk_forecaster = RiskForecaster()  
         self.mitigated_anomalies = set()
         self.mitigation_actions = {
      'CreateBucket': self.notify_admin_bucket_creation,
@@ -51,6 +123,7 @@ class CloudTrailAnalyzer:
         except Exception as e: print(f"Failed to send notification: {e}")
 
     def collect_logs(self):
+     
      """Collect CloudTrail logs from AWS."""
      try:
         response = self.cloudtrail.lookup_events(
@@ -144,17 +217,17 @@ class CloudTrailAnalyzer:
         event_name = anomaly['EventName']
         resource = anomaly.get('Resources', {})
 
-        if event_name == "DescribeInstances":
-            # (unchanged from your existing code)
-            ec2 = boto3.client('ec2')
-            instance_id = resource.get('EC2InstanceId')
-            if instance_id:
-                response = ec2.describe_instances(InstanceIds=[instance_id])
-                return response.get('Reservations', [{}])[0].get('Instances', [{}])[0]
-            else:
-                return "No EC2 instance ID provided in the anomaly resources."
+        # if event_name == "DescribeInstances":
+
+        #     ec2 = boto3.client('ec2')
+        #     instance_id = resource.get('EC2InstanceId')
+        #     if instance_id:
+        #         response = ec2.describe_instances(InstanceIds=[instance_id])
+        #         return response.get('Reservations', [{}])[0].get('Instances', [{}])[0]
+        #     else:
+        #         return "No EC2 instance ID provided in the anomaly resources."
     
-        elif event_name in ["DeleteBucket"]:
+        if event_name in ["DeleteBucket"]:
             bucket_name = resource.get('S3BucketName')
             if bucket_name:
                 s3 = boto3.client('s3')
@@ -215,7 +288,7 @@ class CloudTrailAnalyzer:
 
             ec2 = boto3.client("ec2")
             try:
-             # 1️⃣ Check if the Security Group exists
+             #  Check if the Security Group exists
                 response = ec2.describe_security_groups(GroupIds=[security_group_id])
                 security_group_exists = bool(response["SecurityGroups"])
             except ec2.exceptions.ClientError as e:
@@ -226,7 +299,7 @@ class CloudTrailAnalyzer:
             if not security_group_exists:
                 return f"Security Group {security_group_id} does not exist."
 
-            # 2️⃣ Check if an unauthorized rule exists
+            # Check if an unauthorized rule exists
             security_group = response["SecurityGroups"][0]
             ingress_rules = security_group.get("IpPermissions", [])
 
@@ -625,25 +698,25 @@ class CloudTrailAnalyzer:
         return f"Error fetching state: {e}"
 
 
-    # def tag_anomaly_for_review(self, anomaly):
-    #  try:
-    #     anomaly_details = anomaly.to_dict()
-    #     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    #     file_name = f'anomalies_review_{timestamp}.csv'
+    def tag_anomaly_for_review(self, anomaly):
+     try:
+        anomaly_details = anomaly.to_dict()
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        file_name = f'anomalies_review_{timestamp}.csv'
 
-    #     # Check if the file exists
-    #     if os.path.exists(file_name):
-    #         # Append to the existing file
-    #         df = pd.read_csv(file_name)
-    #         df = pd.concat([df, pd.DataFrame([anomaly_details])], ignore_index=True)
-    #     else:
-    #         # Create a new file
-    #         df = pd.DataFrame([anomaly_details])
+        # Check if the file exists
+        if os.path.exists(file_name):
+            # Append to the existing file
+            df = pd.read_csv(file_name)
+            df = pd.concat([df, pd.DataFrame([anomaly_details])], ignore_index=True)
+        else:
+            # Create a new file
+            df = pd.DataFrame([anomaly_details])
         
-    #     df.to_csv(file_name, index=False)
-    #     print(f"Anomaly tagged and saved for review in {file_name}.")
-    #  except Exception as e:
-    #     print(f"Failed to save anomaly for review: {e}")
+        df.to_csv(file_name, index=False)
+        print(f"Anomaly tagged and saved for review in {file_name}.")
+     except Exception as e:
+        print(f"Failed to save anomaly for review: {e}")
 
 
     def restrict_detach_volume_permission(self, anomaly):
@@ -713,219 +786,219 @@ class CloudTrailAnalyzer:
 
         return msg
 
-    # def restrict_stop_instances_permission(self, anomaly):
+    def restrict_stop_instances_permission(self, anomaly):
     
-    #  user_name = anomaly.get('Resources', {}).get('UserName')
-    #  if not user_name:
-    #     msg = "User name missing in anomaly details for StopInstances."
-    #     print(msg)
-    #     return msg
+     user_name = anomaly.get('Resources', {}).get('UserName')
+     if not user_name:
+        msg = "User name missing in anomaly details for StopInstances."
+        print(msg)
+        return msg
 
-    #  try:
-    #     iam = boto3.client('iam')
-    #     policy_name = "RestrictStopInstances"
+     try:
+        iam = boto3.client('iam')
+        policy_name = "RestrictStopInstances"
 
-    #     # 1) See if the user already has an inline policy named 'RestrictStopInstances'
-    #     existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
-    #     if policy_name in existing_policies:
-    #         # Fetch the existing doc
-    #         response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
-    #         policy_document = response['PolicyDocument']
-    #     else:
-    #         # Start with a minimal blank doc
-    #         policy_document = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
+        # 1) See if the user already has an inline policy named 'RestrictStopInstances'
+        existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
+        if policy_name in existing_policies:
+            # Fetch the existing doc
+            response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
+            policy_document = response['PolicyDocument']
+        else:
+            # Start with a minimal blank doc
+            policy_document = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
 
-    #     # 2) Check if Deny ec2:StopInstances is already in the statements
-    #     already_deny_stop = False
-    #     for stmt in policy_document.get('Statement', []):
-    #         if stmt.get('Effect') == 'Deny':
-    #             actions = stmt.get('Action', [])
-    #             if isinstance(actions, str):
-    #                 actions = [actions]
-    #             if "ec2:StopInstances" in actions:
-    #                 already_deny_stop = True
-    #                 break
+        # 2) Check if Deny ec2:StopInstances is already in the statements
+        already_deny_stop = False
+        for stmt in policy_document.get('Statement', []):
+            if stmt.get('Effect') == 'Deny':
+                actions = stmt.get('Action', [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "ec2:StopInstances" in actions:
+                    already_deny_stop = True
+                    break
 
-    #     if already_deny_stop:
-    #         msg = f"User {user_name} already has a deny policy on ec2:StopInstances."
-    #         print(msg)
-    #         return msg
+        if already_deny_stop:
+            msg = f"User {user_name} already has a deny policy on ec2:StopInstances."
+            print(msg)
+            return msg
 
-    #     # 3) Append the new Deny statement
-    #     policy_document['Statement'].append({
-    #         "Effect": "Deny",
-    #         "Action": "ec2:StopInstances",
-    #         "Resource": "*"
-    #     })
+        # 3) Append the new Deny statement
+        policy_document['Statement'].append({
+            "Effect": "Deny",
+            "Action": "ec2:StopInstances",
+            "Resource": "*"
+        })
 
-    #     # 4) Put the updated policy
-    #     iam.put_user_policy(
-    #         UserName=user_name,
-    #         PolicyName=policy_name,
-    #         PolicyDocument=json.dumps(policy_document)
-    #     )
+        # 4) Put the updated policy
+        iam.put_user_policy(
+            UserName=user_name,
+            PolicyName=policy_name,
+            PolicyDocument=json.dumps(policy_document)
+        )
 
-    #     msg = f"User {user_name} is now denied from calling ec2:StopInstances."
-    #     print(msg)
-    #     return msg
+        msg = f"User {user_name} is now denied from calling ec2:StopInstances."
+        print(msg)
+        return msg
 
-    #  except Exception as e:
-    #     error_msg = f"Failed to restrict StopInstances for user {user_name}: {e}"
-    #     print(error_msg)
-    #     self.notify_admin(
-    #         message=error_msg,
-    #         subject="Mitigation Failure"
-    #     )
-    #     return error_msg
-
-
-    # def prevent_object_access(self, anomaly):
-    #  bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
-    #  object_key = anomaly.get('Resources', {}).get('ObjectKey')
-
-    #  if not bucket_name or not object_key:
-    #     msg = "Bucket name or object key missing in anomaly details."
-    #     print(msg)
-    #     return msg
-
-    #  try:
-    #     s3 = boto3.client('s3')
-
-    #     # 1) Attempt to fetch the existing bucket policy
-    #     try:
-    #         policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
-    #         policy = json.loads(policy_str)
-    #     except s3.exceptions.from_code('NoSuchBucketPolicy'):
-    #         # If there's no existing policy, create an empty one
-    #         policy = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
-
-    #     # 2) Check if there's already a Deny s3:GetObject for this exact object
-    #     already_deny_get = False
-    #     target_arn = f"arn:aws:s3:::{bucket_name}/{object_key}"
-
-    #     for stmt in policy.get('Statement', []):
-    #         if stmt.get('Effect') == 'Deny':
-    #             actions = stmt.get('Action', [])
-    #             if isinstance(actions, str):
-    #                 actions = [actions]
-    #             if "s3:GetObject" in actions:
-    #                 # Check resources
-    #                 stmt_resource = stmt.get('Resource', [])
-    #                 if isinstance(stmt_resource, str):
-    #                     stmt_resource = [stmt_resource]
-    #                 if target_arn in stmt_resource:
-    #                     already_deny_get = True
-    #                     break
-
-    #     if already_deny_get:
-    #         msg = f"Access to object '{object_key}' in bucket '{bucket_name}' is already blocked."
-    #         print(msg)
-    #         return msg
-
-    #     # 3) Append the new Deny statement
-    #     policy['Statement'].append({
-    #         "Effect": "Deny",
-    #         "Principal": "*",
-    #         "Action": "s3:GetObject",
-    #         "Resource": target_arn
-    #     })
-
-    #     # 4) Put the updated policy
-    #     s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
-
-    #     # 5) (Optional) verify the updated policy
-    #     updated_policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
-    #     updated_policy = json.loads(updated_policy_str)
-
-    #     if updated_policy == policy:
-    #         msg = f"Access to object '{object_key}' in bucket '{bucket_name}' has been blocked."
-    #         print(msg)
-    #         return msg
-    #     else:
-    #         msg = f"Policy verification failed for object '{object_key}' in bucket '{bucket_name}'."
-    #         print(msg)
-    #         return msg
-
-    #  except Exception as e:
-    #     error_msg = f"Failed to block object access for {object_key} in {bucket_name}. Error: {e}"
-    #     print(error_msg)
-    #     self.notify_admin(message=error_msg, subject="Mitigation Failure")
-    #     return error_msg
+     except Exception as e:
+        error_msg = f"Failed to restrict StopInstances for user {user_name}: {e}"
+        print(error_msg)
+        self.notify_admin(
+            message=error_msg,
+            subject="Mitigation Failure"
+        )
+        return error_msg
 
 
-    # def limit_bucket_listing_permissions(self, anomaly):
-    #  user_name = anomaly.get('Resources', {}).get('UserName')
-    #  if not user_name:
-    #     msg = "User name missing in anomaly details."
-    #     print(msg)
-    #     return msg
+    def prevent_object_access(self, anomaly):
+     bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
+     object_key = anomaly.get('Resources', {}).get('ObjectKey')
 
-    #  try:
-    #     iam = boto3.client('iam')
-    #     policy_name = "RestrictListBuckets"
+     if not bucket_name or not object_key:
+        msg = "Bucket name or object key missing in anomaly details."
+        print(msg)
+        return msg
 
-    #     # 1) Check if the user already has an inline policy named "RestrictListBuckets"
-    #     existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
+     try:
+        s3 = boto3.client('s3')
+
+        # 1) Attempt to fetch the existing bucket policy
+        try:
+            policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
+            policy = json.loads(policy_str)
+        except s3.exceptions.from_code('NoSuchBucketPolicy'):
+            # If there's no existing policy, create an empty one
+            policy = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
+
+        # 2) Check if there's already a Deny s3:GetObject for this exact object
+        already_deny_get = False
+        target_arn = f"arn:aws:s3:::{bucket_name}/{object_key}"
+
+        for stmt in policy.get('Statement', []):
+            if stmt.get('Effect') == 'Deny':
+                actions = stmt.get('Action', [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "s3:GetObject" in actions:
+                    # Check resources
+                    stmt_resource = stmt.get('Resource', [])
+                    if isinstance(stmt_resource, str):
+                        stmt_resource = [stmt_resource]
+                    if target_arn in stmt_resource:
+                        already_deny_get = True
+                        break
+
+        if already_deny_get:
+            msg = f"Access to object '{object_key}' in bucket '{bucket_name}' is already blocked."
+            print(msg)
+            return msg
+
+        # 3) Append the new Deny statement
+        policy['Statement'].append({
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": target_arn
+        })
+
+        # 4) Put the updated policy
+        s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
+
+        # 5) (Optional) verify the updated policy
+        updated_policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
+        updated_policy = json.loads(updated_policy_str)
+
+        if updated_policy == policy:
+            msg = f"Access to object '{object_key}' in bucket '{bucket_name}' has been blocked."
+            print(msg)
+            return msg
+        else:
+            msg = f"Policy verification failed for object '{object_key}' in bucket '{bucket_name}'."
+            print(msg)
+            return msg
+
+     except Exception as e:
+        error_msg = f"Failed to block object access for {object_key} in {bucket_name}. Error: {e}"
+        print(error_msg)
+        self.notify_admin(message=error_msg, subject="Mitigation Failure")
+        return error_msg
+
+
+    def limit_bucket_listing_permissions(self, anomaly):
+     user_name = anomaly.get('Resources', {}).get('UserName')
+     if not user_name:
+        msg = "User name missing in anomaly details."
+        print(msg)
+        return msg
+
+     try:
+        iam = boto3.client('iam')
+        policy_name = "RestrictListBuckets"
+
+        # 1) Check if the user already has an inline policy named "RestrictListBuckets"
+        existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
         
-    #     if policy_name in existing_policies:
-    #         # Fetch the existing policy doc
-    #         response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
-    #         policy_document = response['PolicyDocument']
-    #     else:
-    #         # Create a minimal policy with no statements
-    #         policy_document = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
+        if policy_name in existing_policies:
+            # Fetch the existing policy doc
+            response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
+            policy_document = response['PolicyDocument']
+        else:
+            # Create a minimal policy with no statements
+            policy_document = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
 
-    #     # 2) Check if a Deny statement for s3:ListBucket is already present
-    #     already_deny_listbucket = False
-    #     for stmt in policy_document.get('Statement', []):
-    #         if stmt.get('Effect') == 'Deny':
-    #             actions = stmt.get('Action', [])
-    #             if isinstance(actions, str):
-    #                 actions = [actions]
-    #             if "s3:ListBucket" in actions:
-    #                 already_deny_listbucket = True
-    #                 break
+        # 2) Check if a Deny statement for s3:ListBucket is already present
+        already_deny_listbucket = False
+        for stmt in policy_document.get('Statement', []):
+            if stmt.get('Effect') == 'Deny':
+                actions = stmt.get('Action', [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "s3:ListBucket" in actions:
+                    already_deny_listbucket = True
+                    break
 
-    #     if already_deny_listbucket:
-    #         msg = f"User {user_name} already has a deny policy on s3:ListBucket. Skipping."
-    #         print(msg)
-    #         return msg
+        if already_deny_listbucket:
+            msg = f"User {user_name} already has a deny policy on s3:ListBucket. Skipping."
+            print(msg)
+            return msg
 
-    #     # 3) Append the Deny statement
-    #     policy_document['Statement'].append({
-    #         "Effect": "Deny",
-    #         "Action": "s3:ListBucket",
-    #         "Resource": "*"
-    #     })
+        # 3) Append the Deny statement
+        policy_document['Statement'].append({
+            "Effect": "Deny",
+            "Action": "s3:ListBucket",
+            "Resource": "*"
+        })
 
-    #     # 4) Put the updated policy
-    #     iam.put_user_policy(
-    #         UserName=user_name,
-    #         PolicyName=policy_name,
-    #         PolicyDocument=json.dumps(policy_document)
-    #     )
+        # 4) Put the updated policy
+        iam.put_user_policy(
+            UserName=user_name,
+            PolicyName=policy_name,
+            PolicyDocument=json.dumps(policy_document)
+        )
 
-    #     msg = f"List bucket permissions restricted for user {user_name}."
-    #     print(msg)
-    #     return msg
+        msg = f"List bucket permissions restricted for user {user_name}."
+        print(msg)
+        return msg
 
-    #  except Exception as e:
-    #     error_msg = f"Failed to restrict bucket listing for user {user_name}: {e}"
-    #     print(error_msg)
-    #     self.notify_admin(
-    #         message=error_msg,
-    #         subject="Mitigation Failure"
-    #     )
-    #     return error_msg
+     except Exception as e:
+        error_msg = f"Failed to restrict bucket listing for user {user_name}: {e}"
+        print(error_msg)
+        self.notify_admin(
+            message=error_msg,
+            subject="Mitigation Failure"
+        )
+        return error_msg
 
 
 
@@ -981,78 +1054,78 @@ class CloudTrailAnalyzer:
         return error_msg
 
         
-    # def block_s3_upload(self, anomaly):
+    def block_s3_upload(self, anomaly):
    
-    #  bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
-    #  if not bucket_name:
-    #     msg = "Bucket name missing in anomaly details."
-    #     print(msg)
-    #     return msg
+     bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
+     if not bucket_name:
+        msg = "Bucket name missing in anomaly details."
+        print(msg)
+        return msg
 
-    #  try:
-    #     s3 = boto3.client('s3')
+     try:
+        s3 = boto3.client('s3')
 
-    #     # 1) Attempt to fetch the existing bucket policy
-    #     try:
-    #         policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
-    #         policy = json.loads(policy_str)
-    #     except s3.exceptions.from_code('NoSuchBucketPolicy'):
-    #         # If there's no existing policy, create an empty one
-    #         policy = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
+        # 1) Attempt to fetch the existing bucket policy
+        try:
+            policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
+            policy = json.loads(policy_str)
+        except s3.exceptions.from_code('NoSuchBucketPolicy'):
+            # If there's no existing policy, create an empty one
+            policy = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
 
-    #     # 2) Check if a Deny statement for PutObject already exists
-    #     already_deny_put = False
-    #     for stmt in policy.get('Statement', []):
-    #         if stmt.get('Effect') == 'Deny':
-    #             actions = stmt.get('Action', [])
-    #             if isinstance(actions, str):
-    #                 actions = [actions]
-    #             # If 's3:PutObject' is in the list, we already have a deny
-    #             if "s3:PutObject" in actions:
-    #                 already_deny_put = True
-    #                 break
+        # 2) Check if a Deny statement for PutObject already exists
+        already_deny_put = False
+        for stmt in policy.get('Statement', []):
+            if stmt.get('Effect') == 'Deny':
+                actions = stmt.get('Action', [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                # If 's3:PutObject' is in the list, we already have a deny
+                if "s3:PutObject" in actions:
+                    already_deny_put = True
+                    break
 
-    #     if already_deny_put:
-    #         msg = f"Bucket '{bucket_name}' already has a Deny PutObject policy. Skipping."
-    #         print(msg)
-    #         return msg
+        if already_deny_put:
+            msg = f"Bucket '{bucket_name}' already has a Deny PutObject policy. Skipping."
+            print(msg)
+            return msg
 
-    #     # 3) Append the new Deny statement
-    #     policy['Statement'].append({
-    #         "Effect": "Deny",
-    #         "Principal": "*",
-    #         "Action": "s3:PutObject",
-    #         "Resource": f"arn:aws:s3:::{bucket_name}/*"
-    #     })
+        # 3) Append the new Deny statement
+        policy['Statement'].append({
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:PutObject",
+            "Resource": f"arn:aws:s3:::{bucket_name}/*"
+        })
 
-    #     # 4) Put the updated policy
-    #     s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
+        # 4) Put the updated policy
+        s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
 
-    #     # 5) Verify the updated policy if desired (optional)
-    #     updated_policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
-    #     updated_policy = json.loads(updated_policy_str)
+        # 5) Verify the updated policy if desired (optional)
+        updated_policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
+        updated_policy = json.loads(updated_policy_str)
 
-    #     # Compare statement arrays or just assume success
-    #     if updated_policy == policy:
-    #         msg = f"PutObject action blocked for bucket '{bucket_name}'. Policy verified."
-    #         print(msg)
-    #         return msg
-    #     else:
-    #         msg = f"Policy verification failed for bucket '{bucket_name}'."
-    #         print(msg)
-    #         return msg
+        # Compare statement arrays or just assume success
+        if updated_policy == policy:
+            msg = f"PutObject action blocked for bucket '{bucket_name}'. Policy verified."
+            print(msg)
+            return msg
+        else:
+            msg = f"Policy verification failed for bucket '{bucket_name}'."
+            print(msg)
+            return msg
 
-    #  except Exception as e:
-    #     error_msg = f"Failed to apply block policy to {bucket_name}: {e}"
-    #     print(error_msg)
-    #     self.notify_admin(
-    #         message=error_msg,
-    #         subject="Mitigation Failure"
-    #     )
-    #     return error_msg
+     except Exception as e:
+        error_msg = f"Failed to apply block policy to {bucket_name}: {e}"
+        print(error_msg)
+        self.notify_admin(
+            message=error_msg,
+            subject="Mitigation Failure"
+        )
+        return error_msg
 
         
 
@@ -1109,69 +1182,69 @@ class CloudTrailAnalyzer:
 
 
 
-    # def stop_unauthorized_instance(self, anomaly):
-    #     user_name = anomaly.get('Resources', {}).get('UserName')
-    #     if not user_name:
-    #         msg = "User name missing in anomaly details for StartInstances."
-    #         print(msg)
-    #         return msg
+    def stop_unauthorized_instance(self, anomaly):
+        user_name = anomaly.get('Resources', {}).get('UserName')
+        if not user_name:
+            msg = "User name missing in anomaly details for StartInstances."
+            print(msg)
+            return msg
 
-    #     try:
-    #         iam = boto3.client('iam')
-    #         policy_name = "RestrictStartInstances"
+        try:
+            iam = boto3.client('iam')
+            policy_name = "RestrictStartInstances"
 
-    #          # 1) See if the user already has an inline policy by this name
-    #         existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
-    #         if policy_name in existing_policies:
-    #             # Fetch the existing doc
-    #             response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
-    #             policy_document = response['PolicyDocument']
-    #         else:
-    #             # Start with a minimal blank doc
-    #              policy_document = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
+             # 1) See if the user already has an inline policy by this name
+            existing_policies = iam.list_user_policies(UserName=user_name)['PolicyNames']
+            if policy_name in existing_policies:
+                # Fetch the existing doc
+                response = iam.get_user_policy(UserName=user_name, PolicyName=policy_name)
+                policy_document = response['PolicyDocument']
+            else:
+                # Start with a minimal blank doc
+                 policy_document = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
 
-    #         # 2) Check if Deny ec2:StartInstances is already in the statements
-    #         already_deny_start = False
-    #         for stmt in policy_document.get('Statement', []):
-    #             if stmt.get('Effect') == 'Deny':
-    #                 actions = stmt.get('Action', [])
-    #                 if isinstance(actions, str):
-    #                     actions = [actions]
-    #                 if "ec2:StartInstances" in actions:
-    #                     already_deny_start = True
-    #                     break
+            # 2) Check if Deny ec2:StartInstances is already in the statements
+            already_deny_start = False
+            for stmt in policy_document.get('Statement', []):
+                if stmt.get('Effect') == 'Deny':
+                    actions = stmt.get('Action', [])
+                    if isinstance(actions, str):
+                        actions = [actions]
+                    if "ec2:StartInstances" in actions:
+                        already_deny_start = True
+                        break
 
-    #         if already_deny_start:
-    #             msg = f"User {user_name} already has a deny policy on ec2:StartInstances."
-    #             print(msg)
-    #             return msg
+            if already_deny_start:
+                msg = f"User {user_name} already has a deny policy on ec2:StartInstances."
+                print(msg)
+                return msg
 
-    #         # 3) Append the new Deny statement
-    #         policy_document['Statement'].append({
-    #             "Effect": "Deny",
-    #             "Action": "ec2:StartInstances",
-    #             "Resource": "*"
-    #         })
+            # 3) Append the new Deny statement
+            policy_document['Statement'].append({
+                "Effect": "Deny",
+                "Action": "ec2:StartInstances",
+                "Resource": "*"
+            })
 
-    #         # 4) Put the updated policy
-    #         iam.put_user_policy(
-    #             UserName=user_name,
-    #             PolicyName=policy_name,
-    #             PolicyDocument=json.dumps(policy_document)
-    #         )
+            # 4) Put the updated policy
+            iam.put_user_policy(
+                UserName=user_name,
+                PolicyName=policy_name,
+                PolicyDocument=json.dumps(policy_document)
+            )
 
-    #         msg = f"User {user_name} is now denied from calling ec2:StartInstances."
-    #         print(msg)
-    #         return msg
+            msg = f"User {user_name} is now denied from calling ec2:StartInstances."
+            print(msg)
+            return msg
 
-    #     except Exception as e:
-    #         error_msg = f"Failed to restrict StartInstances for user {user_name}: {e}"
-    #         print(error_msg)
-    #         self.notify_admin(message=error_msg, subject="Mitigation Failure")
-    #         return error_msg
+        except Exception as e:
+            error_msg = f"Failed to restrict StartInstances for user {user_name}: {e}"
+            print(error_msg)
+            self.notify_admin(message=error_msg, subject="Mitigation Failure")
+            return error_msg
 
     def restrict_describe_instances_permission(self, anomaly):
      user_name = anomaly.get('Resources', {}).get('UserName')
@@ -1224,151 +1297,216 @@ class CloudTrailAnalyzer:
         return error_msg
 
 
-    # def revert_iam_policy_changes(self, anomaly):
-    #  policy_arn = anomaly.get('Resources', {}).get('PolicyArn')
-    #  if not policy_arn:
-    #     print("Policy ARN missing in anomaly details.")
-    #     return
+    def revert_iam_policy_changes(self, anomaly):
+     policy_arn = anomaly.get('Resources', {}).get('PolicyArn')
+     if not policy_arn:
+        print("Policy ARN missing in anomaly details.")
+        return
 
-    #  try:
-    #     iam = boto3.client('iam')
-    #     policy_versions = iam.list_policy_versions(PolicyArn=policy_arn)['Versions']
-    #     latest_version = [v for v in policy_versions if v['IsDefaultVersion']][0]
+     try:
+        iam = boto3.client('iam')
+        policy_versions = iam.list_policy_versions(PolicyArn=policy_arn)['Versions']
+        latest_version = [v for v in policy_versions if v['IsDefaultVersion']][0]
 
-    #     if not latest_version.get('VersionId'):
-    #         raise Exception("No valid default policy version found.")
+        if not latest_version.get('VersionId'):
+            raise Exception("No valid default policy version found.")
 
-    #     iam.delete_policy_version(
-    #         PolicyArn=policy_arn,
-    #         VersionId=latest_version['VersionId']
-    #     )
-    #     print(f"Reverted IAM policy {policy_arn} to previous version.")
-    #  except Exception as e:
-    #     print(f"Failed to revert IAM policy changes for {policy_arn}: {e}")
+        iam.delete_policy_version(
+            PolicyArn=policy_arn,
+            VersionId=latest_version['VersionId']
+        )
+        print(f"Reverted IAM policy {policy_arn} to previous version.")
+     except Exception as e:
+        print(f"Failed to revert IAM policy changes for {policy_arn}: {e}")
+    def log_actual_risk_scores(self, actual_risks):
+        """ Save actual risk scores after new logs are processed. """
+        actual_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(actual_risks), freq='H')
+        
+        actual_risks_df = pd.DataFrame({
+            "Time": actual_timestamps,
+            "ActualRiskScore": actual_risks
+        })
+        actual_risks_df.to_csv("actual_risk_scores.csv", index=False)
+        print("📌 Actual Risk Scores saved.")
+    def compare_predictions():
+    
+    
+     # Load predicted and actual risk scores
+     if not os.path.exists("predicted_risk_scores.csv") or not os.path.exists("actual_risk_scores.csv"):
+        print("⚠️ No data available for comparison yet.")
+        return
 
-    # def prevent_bucket_deletion(self, anomaly):
-    #  bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
-    #  if not bucket_name:
-    #     msg = "Bucket name missing in anomaly details."
-    #     print(msg)
-    #     return msg  # Return the message
+     predicted_risks_df = pd.read_csv("predicted_risk_scores.csv")
+     actual_risks_df = pd.read_csv("actual_risk_scores.csv")
 
-    #  try:
-    #     s3 = boto3.client('s3')
+     # Merge by time for direct comparison
+     comparison = pd.merge(predicted_risks_df, actual_risks_df, on="Time", how="inner")
 
-    #     # 1) Attempt to fetch the existing bucket policy
-    #     try:
-    #         policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
-    #         policy = json.loads(policy_str)
-    #     except s3.exceptions.from_code('NoSuchBucketPolicy'):
-    #         # If there's no existing policy, create an empty one
-    #         policy = {
-    #             "Version": "2012-10-17",
-    #             "Statement": []
-    #         }
+     # Compute error
+     comparison["Error"] = abs(comparison["PredictedRiskScore"] - comparison["ActualRiskScore"])
 
-    #     # 2) Check if a Deny statement for DeleteBucket already exists
-    #     already_deny_delete = False
-    #     for stmt in policy.get('Statement', []):
-    #         if stmt.get('Effect') == 'Deny':
-    #             actions = stmt.get('Action', [])
-    #             if isinstance(actions, str):
-    #                 actions = [actions]
-    #             if "s3:DeleteBucket" in actions:
-    #                 already_deny_delete = True
-    #                 break
+     print("🔍 Prediction Accuracy Report:")
+     print(comparison)
 
-    #     if already_deny_delete:
-    #         msg = f"DeleteBucket policy already in place for bucket {bucket_name}. Skipping."
-    #         print(msg)
-    #         return msg
+     # Save comparison results
+     comparison.to_csv("risk_prediction_comparison.csv", index=False)
+     print("✅ Comparison results saved to 'risk_prediction_comparison.csv'.")
 
-    #     # 3) Append the new Deny statement
-    #     policy['Statement'].append({
-    #         "Effect": "Deny",
-    #         "Principal": "*",
-    #         "Action": "s3:DeleteBucket",
-    #         "Resource": f"arn:aws:s3:::{bucket_name}"
-    #     })
+     # Run comparison
+    compare_predictions()    
+    
+    def prevent_bucket_deletion(self, anomaly):
+     bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
+     if not bucket_name:
+        msg = "Bucket name missing in anomaly details."
+        print(msg)
+        return msg  # Return the message
 
-    #     # 4) Put the updated policy back
-    #     s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
+     try:
+        s3 = boto3.client('s3')
 
-    #     # Print & return final success message
-    #     msg = f"DeleteBucket action blocked for bucket {bucket_name}."
-    #     print(msg)
-    #     return msg
+        # 1) Attempt to fetch the existing bucket policy
+        try:
+            policy_str = s3.get_bucket_policy(Bucket=bucket_name)['Policy']
+            policy = json.loads(policy_str)
+        except s3.exceptions.from_code('NoSuchBucketPolicy'):
+            # If there's no existing policy, create an empty one
+            policy = {
+                "Version": "2012-10-17",
+                "Statement": []
+            }
 
-    #  except Exception as e:
-    #     error_msg = f"Failed to apply deletion prevention for {bucket_name}: {e}"
-    #     print(error_msg)
-    #     self.notify_admin(
-    #         message=f"Failed to block DeleteBucket for {bucket_name}. Error: {e}",
-    #         subject="Mitigation Failure"
-    #     )
-    #     return error_msg
+        # 2) Check if a Deny statement for DeleteBucket already exists
+        already_deny_delete = False
+        for stmt in policy.get('Statement', []):
+            if stmt.get('Effect') == 'Deny':
+                actions = stmt.get('Action', [])
+                if isinstance(actions, str):
+                    actions = [actions]
+                if "s3:DeleteBucket" in actions:
+                    already_deny_delete = True
+                    break
+
+        if already_deny_delete:
+            msg = f"DeleteBucket policy already in place for bucket {bucket_name}. Skipping."
+            print(msg)
+            return msg
+
+        # 3) Append the new Deny statement
+        policy['Statement'].append({
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:DeleteBucket",
+            "Resource": f"arn:aws:s3:::{bucket_name}"
+        })
+
+        # 4) Put the updated policy back
+        s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
+
+        # Print & return final success message
+        msg = f"DeleteBucket action blocked for bucket {bucket_name}."
+        print(msg)
+        return msg
+
+     except Exception as e:
+        error_msg = f"Failed to apply deletion prevention for {bucket_name}: {e}"
+        print(error_msg)
+        self.notify_admin(
+            message=f"Failed to block DeleteBucket for {bucket_name}. Error: {e}",
+            subject="Mitigation Failure"
+        )
+        return error_msg
 
         
 
-
     def run(self):
-    # Step 1: Collect logs
-     events = self.collect_logs()
+        print("🔍 Running CloudTrail Analysis...")
 
-    # Step 2: Preprocess logs
-     process_df, original_data = self.data_processor.preprocess_logs(
-        events,
-        self.unauthorized_api_calls
-    )
+        # Step 1: Collect logs
+        events = self.collect_logs()
 
-     # -- OPTIONAL: Ensure 'Resources' is a dict if there's any doubt --
-     if 'Resources' in original_data.columns:
-        original_data['Resources'] = original_data['Resources'].apply(
-            lambda x: json.loads(x) if isinstance(x, str) else x
+        # Step 2: Preprocess logs
+        process_df, original_data = self.data_processor.preprocess_logs(
+            events,
+            self.unauthorized_api_calls
         )
 
-    # Step 3: Compute dynamic weights
-     weights = self.risk_analyzer.compute_dynamic_weights(original_data)
+        # Ensure 'Resources' column is correctly formatted
+        if 'Resources' in original_data.columns:
+            original_data['Resources'] = original_data['Resources'].apply(
+                lambda x: json.loads(x) if isinstance(x, str) else x
+            )
 
-    # Step 4: Calculate risk scores
-     for idx, row in original_data.iterrows():
-        score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
-        original_data.at[idx, 'RiskScore'] = score
-        original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
+        # Step 3: Compute dynamic risk weights
+        weights = self.risk_analyzer.compute_dynamic_weights(original_data)
 
-    # Step 5: Compliance
-     compliance_checker = ComplianceChecker()
-     original_data['ComplianceReasons'] = original_data.apply(
-        lambda row: "; ".join(compliance_checker.check_all_compliance(row)), axis=1
-    )
-     original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
-        lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
-    )
+        # Step 4: Calculate risk scores
+        past_risk_scores = []
+        for idx, row in original_data.iterrows():
+            score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
+            original_data.at[idx, 'RiskScore'] = score
+            original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
+            past_risk_scores.append(score)  # Store for forecasting
 
-    # Step 6: Detect anomalies
-     anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(
-        process_df,
-        original_data
-    )
-     if anomaly_events is not None and not anomaly_events.empty:
-        print("DEBUG: Checking sample anomalies with 'Resources':")
-        print(anomaly_events[['EventName', 'Resources']].head())
+        # self.risk_analyzer.visualize_unusual_hours(original_data)
 
-        # Save to CSV on disk (optional)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        anomaly_events.to_csv("anomalies.csv", index=False)
-        print("Anomalies saved to anomalies.csv")
+        # ✅ Step 5: Predict Future Risks
+        risk_forecaster = RiskForecaster()
+        if past_risk_scores:
+            print("📊 Training risk forecasting model...")
+            risk_forecaster.train_model(past_risk_scores)
+            future_risks = risk_forecaster.predict_future_risk(steps=10)
 
-        # Also create an in-memory CSV string for returning to the UI
-        csv_buffer = io.StringIO()
-        anomaly_events.to_csv(csv_buffer, index=False)
-        self.csv_output = csv_buffer.getvalue()
+            # Visualize the risk trend
+            risk_forecaster.visualize_risk_trend(past_risk_scores, future_risks)
 
-        # Mitigate anomalies
-        self.mitigate_anomalies(anomaly_events)
-     else:
-        # If no anomalies, we set a friendly message
-        print("No anomalies found. No CSV created.")
-        self.csv_output = "No anomalies found.\n"
+            # Save Predictions for comparison later
+            future_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(future_risks), freq='H')
+            predicted_risks_df = pd.DataFrame({
+                "Time": future_timestamps,
+                "PredictedRiskScore": future_risks
+            })
+            predicted_risks_df.to_csv("predicted_risk_scores.csv", index=False)
+            print("🔮 Predicted Risk Scores saved.")
 
-     return original_data
+            # Check max predicted risk and trigger alert if needed
+            predicted_risk = max(future_risks) if any(future_risks) else 0
+            risk_threshold = 50
+            if predicted_risk > risk_threshold:
+                alert_message = f"🚨 Future Risk Alert: Predicted risk score of {predicted_risk} exceeds threshold!"
+                print(alert_message)
+                self.notify_admin(alert_message, subject="High Risk Prediction")
+
+        # ✅ Step 6: Compliance Check
+        compliance_checker = ComplianceChecker()
+        original_data['ComplianceReasons'] = original_data.apply(
+            lambda row: "; ".join(compliance_checker.check_all_compliance(row)), axis=1
+        )
+        original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
+            lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
+        )
+
+        # ✅ Step 7: Detect anomalies
+        anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(process_df, original_data)
+
+        if anomaly_events is not None and not anomaly_events.empty:
+            print("🚨 Anomalies Detected! Saving and mitigating...")
+            print(anomaly_events[['EventName', 'Resources']].head())
+
+            # Save to CSV
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            anomaly_events.to_csv(f"anomalies_{timestamp}.csv", index=False)
+            print(f"Anomalies saved to anomalies_{timestamp}.csv")
+
+            # Also create an in-memory CSV string for UI return
+            csv_buffer = io.StringIO()
+            anomaly_events.to_csv(csv_buffer, index=False)
+            self.csv_output = csv_buffer.getvalue()
+
+            # Mitigate anomalies
+            self.mitigate_anomalies(anomaly_events)
+        else:
+            print("✅ No anomalies found.")
+            self.csv_output = "No anomalies found.\n"
+
+        return original_data

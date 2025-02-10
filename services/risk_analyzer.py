@@ -1,106 +1,165 @@
+from matplotlib import pyplot as plt
+from sklearn.ensemble import IsolationForest
 from services.compliance_checker import ComplianceChecker
-
+import seaborn as sns
+from sklearn.cluster import KMeans
+import numpy as np
+import pandas as pd
 
 class RiskAnalyzer:
     def __init__(self):
         self.compliance_checker = ComplianceChecker()
 
     def compute_dynamic_weights(self, df):
-     """Compute dynamic weights for risk factors."""
-     weights = {}
+        """Compute dynamic weights for risk factors, including anomaly detection for access hours."""
+        weights = {}
 
-        # Dynamic weight for hour-based risk, calculated based on the spread of hour values
-     if 'Hour' in df.columns:
-         hour_range = df['Hour'].max() - df['Hour'].min()
-         weights['hour_weight'] = (hour_range + 1) * 2  # Example dynamic calculation based on hour spread
-     else:
-        weights['hour_weight'] = df.shape[0] * 0.1  # Fallback if 'Hour' column is missing
+         # ✅ Step 1: Ensure 'Hour' and 'Username' Columns Exist
+        if 'Hour' in df.columns and 'Username' in df.columns:
+            df['UnusualHour'] = 0  # Default all as normal
+            
+            unique_users = df['Username'].unique()
+            for user in unique_users:
+                user_data = df[df['Username'] == user]  # Filter logs per user
+                
+                if len(user_data) < 5:  # Not enough data for proper anomaly detection
+                    continue  
 
-    # Dynamic weight for EventFrequency, considering data distribution (std / mean ratio)
-     if 'EventFrequency' in df.columns:
-        weights['event_frequency_weight'] = (df['EventFrequency'].std() / df['EventFrequency'].mean()) * 10
-     else:
-        weights['event_frequency_weight'] = df.shape[0] * 0.05  # Fallback dynamic weight based on number of records
+                hour_values = user_data['Hour'].values.reshape(-1, 1)
 
-    # Dynamic weight for UserEventFrequency, calculated similarly to EventFrequency
-     if 'UserEventFrequency' in df.columns:
-        weights['user_event_frequency_weight'] = (df['UserEventFrequency'].std() / df['UserEventFrequency'].mean()) * 5
-     else:
-        weights['user_event_frequency_weight'] = df.shape[0] * 0.05  # Fallback dynamic weight
+               
+                isolation_forest = IsolationForest(contamination=0.1, random_state=42)
+                anomaly_labels = isolation_forest.fit_predict(hour_values)
 
-    # Dynamic weight for IPEventFrequency, calculated similarly
-     if 'IPEventFrequency' in df.columns:
-        weights['ip_event_frequency_weight'] = (df['IPEventFrequency'].std() / df['IPEventFrequency'].mean()) * 5
-     else:
-        weights['ip_event_frequency_weight'] = df.shape[0] * 0.05  # Fallback dynamic weight
+                # Mark anomalous login hours (-1 in Isolation Forest means anomaly)
+                df.loc[df['Username'] == user, 'UnusualHour'] = (anomaly_labels == -1).astype(int)
 
-    # Dynamic weight for critical events, using the variance of critical event occurrences
-     if 'CriticalEvent' in df.columns:
-        critical_event_variance = df['CriticalEvent'].var()
-        weights['critical_event_weight'] = critical_event_variance * 15  # Example dynamic weight
-     else:
-        weights['critical_event_weight'] = df.shape[0] * 0.1  # Fallback based on number of records
+            # Normalize hour weight (scales between 0 and 1)
+            weights['hour_weight'] = df['UnusualHour'].mean() * 10  # Scale impact factor
 
-    # Dynamic weight for failed login attempts, based on frequency of failed attempts
-     if 'FailedLogin' in df.columns:
-        failed_login_rate = df['FailedLogin'].sum() / df.shape[0]  # Frequency of failed logins
-        weights['failed_login_weight'] = failed_login_rate * 40  # Scaled by failed login rate
-     else:
-        weights['failed_login_weight'] = df.shape[0] * 0.1  # Fallback dynamic weight
+        else:
+            weights['hour_weight'] = df.shape[0] * 0.1  # Fallback if 'Hour' column is missing
 
-    # Dynamic weight for sensitive data access, based on frequency of access
-     if 'SensitiveDataAccess' in df.columns:
-        sensitive_data_access_rate = df['SensitiveDataAccess'].sum() / df.shape[0]
-        weights['sensitive_data_access_weight'] = sensitive_data_access_rate * 30  # Scaled weight
-     else:
-        weights['sensitive_data_access_weight'] = df.shape[0] * 0.1  # Fallback dynamic weight
+        # ✅ Step 2: Compute Dynamic Weight for Event Frequency
+        if 'EventFrequency' in df.columns:
+            event_std = df['EventFrequency'].std()
+            event_mean = df['EventFrequency'].mean()
 
-     return weights
+            if event_mean > 0:
+                weights['event_frequency_weight'] = (event_std / event_mean) * 10
+            else:
+                weights['event_frequency_weight'] = 1  # Default if mean is zero
 
+            # 🧠 Detect Event Frequency Anomalies using Rolling Statistics
+            df['RollingMean'] = df['EventFrequency'].rolling(window=5, min_periods=1).mean()
+            df['RollingStd'] = df['EventFrequency'].rolling(window=5, min_periods=1).std()
+
+            df['AnomalousEvent'] = (df['EventFrequency'] > (df['RollingMean'] + 2 * df['RollingStd'])).astype(int)
+            weights['event_frequency_weight'] += df['AnomalousEvent'].mean() * 5  # Increase weight for anomalies
+        else:
+            weights['event_frequency_weight'] = df.shape[0] * 0.05  # Fallback based on dataset size
+
+        # ✅ Step 3: Compute Dynamic Weights for User-Based Frequency
+        if 'UserEventFrequency' in df.columns:
+            user_std = df['UserEventFrequency'].std()
+            user_mean = df['UserEventFrequency'].mean()
+
+            weights['user_event_frequency_weight'] = (user_std / user_mean) * 5 if user_mean > 0 else 1
+        else:
+            weights['user_event_frequency_weight'] = df.shape[0] * 0.05  # Fallback
+
+        # ✅ Step 4: Compute Dynamic Weights for IP-Based Frequency
+        if 'IPEventFrequency' in df.columns:
+            ip_std = df['IPEventFrequency'].std()
+            ip_mean = df['IPEventFrequency'].mean()
+
+            weights['ip_event_frequency_weight'] = (ip_std / ip_mean) * 5 if ip_mean > 0 else 1
+        else:
+            weights['ip_event_frequency_weight'] = df.shape[0] * 0.05  # Fallback
+
+        # ✅ Step 5: Compute Weights for Critical Events
+        if 'CriticalEvent' in df.columns:
+            weights['critical_event_weight'] = df['CriticalEvent'].var() * 15 if df['CriticalEvent'].var() > 0 else 1
+        else:
+            weights['critical_event_weight'] = df.shape[0] * 0.1  # Fallback
+
+        # ✅ Step 6: Compute Weights for Failed Login Attempts
+        if 'FailedLogin' in df.columns:
+            failed_login_rate = df['FailedLogin'].sum() / df.shape[0]  # Percentage of failed logins
+            weights['failed_login_weight'] = failed_login_rate * 40
+        else:
+            weights['failed_login_weight'] = df.shape[0] * 0.1  # Fallback
+
+        # ✅ Step 7: Compute Weights for Sensitive Data Access
+        if 'SensitiveDataAccess' in df.columns:
+            sensitive_data_access_rate = df['SensitiveDataAccess'].sum() / df.shape[0]
+            weights['sensitive_data_access_weight'] = sensitive_data_access_rate * 30
+        else:
+            weights['sensitive_data_access_weight'] = df.shape[0] * 0.1  # Fallback
+
+        return weights
 
     def calculate_risk_score(self, row, weights):
-        """Calculate risk score for a single event."""
-        score = 0
-        reasons = []
+     """Calculate risk score for a single event with adaptive dynamic weighting."""
+     score = 0
+     reasons = []
 
-        compliance_violations = self.compliance_checker.check_all_compliance(row.to_dict())
-        if compliance_violations:
-            score += 30
-            reasons.extend(compliance_violations)
+     # ✅ Step 1: Compliance Violations
+     compliance_violations = self.compliance_checker.check_all_compliance(row.to_dict())
+     if compliance_violations:
+        score += 30
+        reasons.extend(compliance_violations)
 
-        # Time-based risk
-        if row['Hour'] < 6 or row['Hour'] > 22:
-            score += weights['hour_weight']
-            reasons.append(f"Unusual time of day: {row['Hour']}")
+     # ✅ Step 2: Time-based Risk (Unusual Access Hours)
+     if row.get('UnusualHour', 0) == 1:
+        previous_logins = row.get('PreviousLoginsAtHour', 0)  # How often user logged in at this hour
+        adjustment_factor = 1 - (previous_logins / 10)  # Reduce weight if this is common for the user
+        adjusted_weight = max(weights['hour_weight'] * adjustment_factor, weights['hour_weight'] * 0.3)
+        score += adjusted_weight
+        reasons.append(f"Unusual access time: {row['Hour']} (Previous logins: {previous_logins})")
 
-        # Frequency-based risks
-        if row['EventFrequency'] < row['LowerThreshold'] or row['EventFrequency'] > row['UpperThreshold']:
-            score += weights['event_frequency_weight']
-            reasons.append(f"Event {row['EventName']} has unusual frequency")
+     # ✅ Step 3: Frequency-Based Risk (Adjusted by Event Type)
+     severity_multiplier = 2 if row['EventName'] in ["DeleteBucket", "StopInstances"] else 1  # High-risk events
+     if row['EventFrequency'] > row['UpperThreshold']:
+        adjusted_weight = weights['event_frequency_weight'] * severity_multiplier
+        score += adjusted_weight
+        reasons.append(f"Unusual frequency for {row['EventName']} (Severity: {severity_multiplier}x)")
 
-        # User-based frequency
-        if row['UserEventFrequency'] > row['UserThreshold']:
-            score += weights['user_event_frequency_weight']
-            reasons.append(f"User {row['Username']} exceeded event frequency")
+    # ✅ Step 4: User-Based Frequency Risk (Adjust for Experienced Users)
+     if row['UserEventFrequency'] > row['UserThreshold']:
+        user_history_factor = 1 - min(row['UserEventFrequency'] / 20, 0.5)  # Reduce weight if user does this often
+        adjusted_weight = weights['user_event_frequency_weight'] * user_history_factor
+        score += adjusted_weight
+        reasons.append(f"User {row['Username']} exceeded event frequency (Adjusted weight: {adjusted_weight:.2f})")
 
-        # # IP-based frequency
-        # if row['IPEventFrequency'] > row['IPThreshold']:
-        #     score += weights['ip_event_frequency_weight']
-        #     reasons.append(f"IP {row['IP']} shows unusual activity")
+     # ✅ Step 5: IP-Based Frequency Risk (Consider Reputation)
+     if row['IPEventFrequency'] > row['IPThreshold']:
+        ip_reputation_factor = row.get('IPReputationScore', 1)  # Default to 1 if unknown
+        adjusted_weight = weights['ip_event_frequency_weight'] * ip_reputation_factor
+        score += adjusted_weight
+        reasons.append(f"IP {row['SourceIPAddress']} shows unusual activity (Reputation Factor: {ip_reputation_factor})")
 
-        # Critical event detection
-        if row['EventName'] in ["DeleteBucket", "StopInstances"]:
-            score += weights['critical_event_weight']
-            reasons.append(f"Critical event detected: {row['EventName']}")
+     # ✅ Step 6: Critical Event Detection (Scale with Recent Critical Events)
+     recent_critical_events = row.get('RecentCriticalEvents', 0)  # How many in the past X hours?
+     if row['EventName'] in ["DeleteBucket", "StopInstances"]:
+        scaling_factor = 1 + (recent_critical_events / 5)  # Increase impact if multiple critical events occurred
+        adjusted_weight = weights['critical_event_weight'] * scaling_factor
+        score += adjusted_weight
+        reasons.append(f"Critical event detected: {row['EventName']} (Scaling Factor: {scaling_factor:.2f})")
 
-        # Failed login attempts
-        if row['FailedLoginAttempts'] > 3:
-            score += weights['failed_login_weight']
-            reasons.append(f"Multiple failed login attempts: {row['FailedLoginAttempts']}")
+     # ✅ Step 7: Failed Login Attempts (Exponential Weighting)
+     if row['FailedLoginAttempts'] > 3:
+        failed_attempts = row['FailedLoginAttempts']
+        adjusted_weight = weights['failed_login_weight'] * (1.2 ** (failed_attempts - 3))  # Exponential increase
+        score += adjusted_weight
+        reasons.append(f"Multiple failed login attempts: {failed_attempts} (Adjusted weight: {adjusted_weight:.2f})")
 
-        # # Sensitive data access
-        # if row['SensitiveDataAccess']:
-        #     score += weights['sensitive_data_access_weight']
-        #     reasons.append("Access to sensitive data detected")
+    # ✅ Step 8: Sensitive Data Access (Factor in User Role)
+     if row.get('SensitiveDataAccess', 0) == 1:
+        user_role_factor = 0.5 if row.get('UserRole') in ["Admin", "Security"] else 1  # Reduce weight for authorized users
+        adjusted_weight = weights['sensitive_data_access_weight'] * user_role_factor
+        score += adjusted_weight
+        reasons.append(f"Access to sensitive data detected (User Role Factor: {user_role_factor})")
 
-        return score, reasons
+     return score, reasons
+

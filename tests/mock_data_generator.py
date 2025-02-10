@@ -27,8 +27,8 @@ def generate_mock_data():
         "AttachVolume",# mitigated
         "DetachVolume", # mitigated
         "AuthorizeSecurityGroupIngress",
-        "RevokeSecurityGroupIngress"
-    ]
+        "RevokeSecurityGroupIngress"]
+    
     
     usernames = ["Alice", "Charlie"]
     source_ips = ["192.168.1.1", "192.168.1.2", "10.0.0.1", "172.16.0.2", "203.0.113.5"]
@@ -231,7 +231,7 @@ if __name__ == "__main__":
         print(results[["EventName", "Username", "SourceIPAddress", "RiskScore", "RiskReasons"]].head())
 
 if __name__ == "__main__":
-    analyzer = CloudTrailAnalyzer()
+    analyzer = CloudTrailAnalyzer() 
     results = analyzer.run()
     if results is not None:
         print(results[['EventName', 'Username', 'SourceIPAddress', 'RiskScore', 'RiskReasons']].head())
@@ -244,3 +244,20 @@ if __name__ == "__main__":
         plt.xlabel("Risk Category")
         plt.ylabel("Count")
         plt.show()
+
+
+#  How to Modify It to Use Real CloudTrail Logs
+# Right now, the script replaces CloudTrail logs with mock data. To use real logs:
+
+# ✅ Remove the Override of collect_logs()
+# Replace:
+
+
+# analyzer.collect_logs = lambda: mock_events
+# With:
+
+
+# # Use real AWS CloudTrail logs instead of mock data
+# analyzer = CloudTrailAnalyzer()
+# results = analyzer.run()
+# This will allow CloudTrailAnalyzer to fetch real AWS CloudTrail logs.
