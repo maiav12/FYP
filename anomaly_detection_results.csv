@@ -1,0 +1,6 @@
+Algorithm,AnomalyIndices
+iforest,[13 23 33 39 43 51 58 77 87 97]
+lof,[23 46 51 58 66 74 79 83 87 93]
+ocsvm,[17 22 23 30 43 51 87 93 94 97]
+knn,[]
+hbos,[]

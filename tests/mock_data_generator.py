@@ -203,9 +203,6 @@ def generate_mock_data():
 
 mock_events = generate_mock_data()
 
-############################
-# CHECKPOINT: Print an event
-############################
 for evt in mock_events:
     if evt["EventName"] == "DeleteBucket":
         print("SAMPLE DELETE BUCKET EVENT:\n", json.dumps(evt, indent=2))
@@ -230,20 +227,20 @@ if __name__ == "__main__":
     if results is not None:
         print(results[["EventName", "Username", "SourceIPAddress", "RiskScore", "RiskReasons"]].head())
 
-if __name__ == "__main__":
-    analyzer = CloudTrailAnalyzer() 
-    results = analyzer.run()
-    if results is not None:
-        print(results[['EventName', 'Username', 'SourceIPAddress', 'RiskScore', 'RiskReasons']].head())
-        # Visualize Risk Categories
-        results['RiskCategory'] = results['RiskScore'].apply(
-            lambda x: "High" if x > 40 else "Medium" if x > 20 else "Low"
-        )
-        sns.countplot(data=results, x='RiskCategory', palette='viridis')
-        plt.title("Risk Category Distribution")
-        plt.xlabel("Risk Category")
-        plt.ylabel("Count")
-        plt.show()
+# if __name__ == "__main__":
+#     analyzer = CloudTrailAnalyzer() 
+#     results = analyzer.run()
+#     if results is not None:
+#         print(results[['EventName', 'Username', 'SourceIPAddress', 'RiskScore', 'RiskReasons']].head())
+#         # Visualize Risk Categories
+#         results['RiskCategory'] = results['RiskScore'].apply(
+#             lambda x: "High" if x > 40 else "Medium" if x > 20 else "Low"
+#         )
+#         sns.countplot(data=results, x='RiskCategory', palette='viridis')
+#         plt.title("Risk Category Distribution")
+#         plt.xlabel("Risk Category")
+#         plt.ylabel("Count")
+#         plt.show()
 
 
 #  How to Modify It to Use Real CloudTrail Logs
