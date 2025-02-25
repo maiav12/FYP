@@ -9,15 +9,15 @@ import matplotlib.pyplot as plt
 import boto3
 import json
 from datetime import datetime
-import seaborn as sns
+
+
 import pandas as pd
+from anomaly_saver import save_anomalies_to_dynamodb
 from services.data_processor import DataProcessor
 from services.anomaly_detector import AnomalyDetector
 from services.risk_analyzer import RiskAnalyzer
 from services.compliance_checker import ComplianceChecker
-from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
-
-sns_client = boto3.client('sns')
+sns = boto3.client('sns')
 topic_arn = 'arn:aws:sns:eu-north-1:699475953257:cloudtrail-alerts'
 
 class RiskForecaster:
@@ -101,21 +101,21 @@ class CloudTrailAnalyzer:
 
     'PutObject': self.block_s3_upload,
      'StartInstances': self.stop_unauthorized_instance,
-      'DescribeInstances': self.restrict_describe_instances_permission,
+     'DescribeInstances': self.restrict_describe_instances_permission,
      'AttachVolume': self.restrict_attach_volume_permission,
      'DetachVolume': self.restrict_detach_volume_permission,
      'DeleteBucket': self.prevent_bucket_deletion,
-      'GetObject': self.prevent_object_access,
+     'GetObject': self.prevent_object_access,
      'ListBuckets': self.limit_bucket_listing_permissions,
 }
         self.mitigation_log = []
 
 
 
-    
+
     def notify_admin(self, message, subject="CloudTrail Anomaly Detected"):
         try:
-          response = sns_client.publish(
+          response = sns.publish(
             TopicArn=topic_arn,
             Message=message,
             Subject=subject
@@ -211,7 +211,7 @@ class CloudTrailAnalyzer:
                 # subject="Manual Review Required"
             # )
 
-    
+
 
     def get_resource_state(self, anomaly):
   
@@ -219,15 +219,15 @@ class CloudTrailAnalyzer:
         event_name = anomaly['EventName']
         resource = anomaly.get('Resources', {})
 
-        if event_name == "DescribeInstances":
+        # if event_name == "DescribeInstances":
 
-            ec2 = boto3.client('ec2')
-            instance_id = resource.get('EC2InstanceId')
-            if instance_id:
-                response = ec2.describe_instances(InstanceIds=[instance_id])
-                return response.get('Reservations', [{}])[0].get('Instances', [{}])[0]
-            else:
-                return "No EC2 instance ID provided in the anomaly resources."
+        #     ec2 = boto3.client('ec2')
+        #     instance_id = resource.get('EC2InstanceId')
+        #     if instance_id:
+        #         response = ec2.describe_instances(InstanceIds=[instance_id])
+        #         return response.get('Reservations', [{}])[0].get('Instances', [{}])[0]
+        #     else:
+        #         return "No EC2 instance ID provided in the anomaly resources."
     
         if event_name in ["DeleteBucket"]:
             bucket_name = resource.get('S3BucketName')
@@ -1420,184 +1420,82 @@ class CloudTrailAnalyzer:
         return error_msg
 
         
-    def evaluate_model(self,y_true, y_pred):
- 
-     try:
-        precision = precision_score(y_true, y_pred, average="binary", zero_division=0)
-        recall = recall_score(y_true, y_pred, average="binary", zero_division=0)
-        f1 = f1_score(y_true, y_pred, average="binary", zero_division=0)
-        auc = roc_auc_score(y_true, y_pred)
-     except ValueError:
-        precision, recall, f1, auc = 0, 0, 0, 0  # In case of an issue (like only 1 class in y_true)
 
-     return {"Precision": precision, "Recall": recall, "F1-Score": f1, "AUC": auc}
     def run(self):
-     print("🔍 Running CloudTrail Analysis...")
+        print("🔍 Running CloudTrail Analysis...")
 
-    # Step 1: Collect logs
-     events = self.collect_logs()
+        # Step 1: Collect logs
+        events = self.collect_logs()
 
-    # Step 2: Preprocess logs
-     process_df, original_data = self.data_processor.preprocess_logs(
-        events,
-        self.unauthorized_api_calls
-     )
-
-    # Ensure 'Resources' column is correctly formatted
-     if 'Resources' in original_data.columns:
-        original_data['Resources'] = original_data['Resources'].apply(
-            lambda x: json.loads(x) if isinstance(x, str) else x
+        # Step 2: Preprocess logs
+        process_df, original_data = self.data_processor.preprocess_logs(
+            events,
+            self.unauthorized_api_calls
         )
 
-    # Step 3: Compute dynamic risk weights
-     weights = self.risk_analyzer.compute_dynamic_weights(original_data)
+        # Ensure 'Resources' column is correctly formatted
+        if 'Resources' in original_data.columns:
+            original_data['Resources'] = original_data['Resources'].apply(
+                lambda x: json.loads(x) if isinstance(x, str) else x
+            )
 
-    # Step 4: Calculate risk scores
-     past_risk_scores = []
-     for idx, row in original_data.iterrows():
-        score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
-        original_data.at[idx, 'RiskScore'] = score
-        original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
-        past_risk_scores.append(score)  # Store for forecasting
+        # Step 3: Compute dynamic risk weights
+        weights = self.risk_analyzer.compute_dynamic_weights(original_data)
 
-     # Step 5: Predict Future Risks (for forecasting, if needed)
-     risk_forecaster = RiskForecaster()
-     if past_risk_scores:
-        print("📊 Training risk forecasting model...")
-        risk_forecaster.train_model(past_risk_scores)
-        future_risks = risk_forecaster.predict_future_risk(steps=10)
-        future_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(future_risks), freq='H')
-        predicted_risks_df = pd.DataFrame({
-            "Time": future_timestamps,
-            "PredictedRiskScore": future_risks
-        })
-        predicted_risks_df.to_csv("predicted_risk_scores.csv", index=False)
-        print("🔮 Predicted Risk Scores saved.")
-        predicted_risk = max(future_risks) if any(future_risks) else 0
-        risk_threshold = 50
-        if predicted_risk > risk_threshold:
-            alert_message = f"🚨 Future Risk Alert: Predicted risk score of {predicted_risk} exceeds threshold!"
-            print(alert_message)
-            self.notify_admin(alert_message, subject="High Risk Prediction")
+        # Step 4: Calculate risk scores
+        past_risk_scores = []
+        for idx, row in original_data.iterrows():
+            score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
+            original_data.at[idx, 'RiskScore'] = score
+            original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
+            past_risk_scores.append(score)  # Store for forecasting
 
-    # Step 6: Compliance Check
-     compliance_checker = ComplianceChecker()
-     original_data['ComplianceReasons'] = original_data.apply(
-        lambda row: "; ".join(compliance_checker.check_all_compliance(row)), axis=1
-     )
-     original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
-        lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
-    )
+        # self.risk_analyzer.visualize_unusual_hours(original_data)
 
-    # ----------------------------
-    # Step 7: Compare Hyperparameter Strategies Across Algorithms
-    # ----------------------------
-     print("\n🔍 Running Anomaly Detection Comparison...")
-     algorithms = ["iforest", "lof", "ocsvm", "knn", "hbos"]
-     strategies = ["out-of-the-box", "peak", "best_default", "tuned"]
-     experiment_results = []
+        # ✅ Step 5: Predict Future Risks
+        risk_forecaster = RiskForecaster()
+        if past_risk_scores:
+            print("📊 Training risk forecasting model...")
+            risk_forecaster.train_model(past_risk_scores)
+            future_risks = risk_forecaster.predict_future_risk(steps=10)
 
-    # Ensure ground truth labels exist in original_data
-     if "Anomaly_Label" not in original_data.columns:
-        print("⚠️ 'Anomaly_Label' column missing. Assigning default labels (0 for normal, 1 for anomalies) based on IFOREST results...")
-        original_data["Anomaly_Label"] = 0
-        # Here, we assume IForest detects the anomalies correctly.
-        if "iforest" not in original_data.columns:
-            # If not already computed, run default IForest detection:
-            detector_default = AnomalyDetector(method="iforest", tuning_strategy="out-of-the-box")
-            if_indices, _ = detector_default.detect_anomalies(process_df, original_data)
-            original_data.loc[original_data.index.isin(if_indices), "Anomaly_Label"] = 1
+            # Visualize the risk trend
+#            risk_forecaster.visualize_risk_trend(past_risk_scores, future_risks)
 
-     y_true = original_data["Anomaly_Label"].values
+            # Save Predictions for comparison later
+            future_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(future_risks), freq='H')
+            predicted_risks_df = pd.DataFrame({
+                "Time": future_timestamps,
+                "PredictedRiskScore": future_risks
+            })
+            predicted_risks_df.to_csv("predicted_risk_scores.csv", index=False)
+            print("🔮 Predicted Risk Scores saved.")
 
-     for algo in algorithms:
-        for strat in strategies:
-            print(f"🚀 Running {algo.upper()} with strategy '{strat}'...")
-            try:
-                detector = AnomalyDetector(method=algo, tuning_strategy=strat)
-                anomaly_indices, _ = detector.detect_anomalies(process_df, original_data)
-                if anomaly_indices is None:
-                    print(f"⚠️ {algo.upper()} with strategy '{strat}' returned no anomalies.")
-                    anomaly_indices = []
-                # Create predictions: rows whose index is in anomaly_indices are marked as anomalies (1)
-                y_pred = (original_data.index.isin(anomaly_indices)).astype(int)
-                from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
-                try:
-                    precision = precision_score(y_true, y_pred, average="binary", zero_division=0)
-                    recall = recall_score(y_true, y_pred, average="binary", zero_division=0)
-                    f1 = f1_score(y_true, y_pred, average="binary", zero_division=0)
-                    auc = roc_auc_score(y_true, y_pred)
-                except Exception:
-                    precision, recall, f1, auc = np.nan, np.nan, np.nan, np.nan
+            # Check max predicted risk and trigger alert if needed
+            predicted_risk = max(future_risks) if any(future_risks) else 0
+            risk_threshold = 50
+            if predicted_risk > risk_threshold:
+                alert_message = f"🚨 Future Risk Alert: Predicted risk score of {predicted_risk} exceeds threshold!"
+                print(alert_message)
+                self.notify_admin(alert_message, subject="High Risk Prediction")
 
-                experiment_results.append({
-                    "Dataset": "CloudTrail",
-                    "Algorithm": algo,
-                    "Strategy": strat,
-                    "Precision": precision,
-                    "Recall": recall,
-                    "F1": f1,
-                    "AUC": auc
-                })
-            except Exception as e:
-                print(f"⚠️ Error with {algo.upper()} and strategy '{strat}': {e}")
-                experiment_results.append({
-                    "Dataset": "CloudTrail",
-                    "Algorithm": algo,
-                    "Strategy": strat,
-                    "Precision": np.nan,
-                    "Recall": np.nan,
-                    "F1": np.nan,
-                    "AUC": np.nan
-                })
+        # ✅ Step 6: Compliance Check
+        compliance_checker = ComplianceChecker()
+        original_data['ComplianceReasons'] = original_data.apply(
+            lambda row: "; ".join(compliance_checker.check_all_compliance(row)), axis=1
+        )
+        original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
+            lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
+        )
 
-     exp_df = pd.DataFrame(experiment_results)
+        # ✅ Step 7: Detect anomalies
+        anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(process_df, original_data)
 
-    # Save experiment results
-     exp_df.to_csv("cloudtrail_experiment_results.csv", index=False)
-     print("✅ Experiment results saved to 'cloudtrail_experiment_results.csv'.")
+        if anomaly_events is not None and not anomaly_events.empty:
+            anomaly_count = len(anomaly_events)
+            anomalies_json = anomaly_events.to_dict(orient='records')
+            print("🚨 Anomalies Detected! Count:", anomaly_count)
 
-    # ----------------------------
-    # Step 8: Aggregate & Visualize Results
-    # ----------------------------
-    # Create a pivot table summarizing the average AUC for each (Algorithm, Strategy)
-     summary_auc = exp_df.pivot_table(index="Algorithm", columns="Strategy", values="AUC", aggfunc="mean")
-     print("\n📊 Average AUC by (Algorithm, Strategy):\n", summary_auc)
-
-    # Plot the results (e.g., AUC)
-     sns.set(style="whitegrid")
-     plt.figure(figsize=(10, 6))
-     sns.barplot(data=exp_df, x="Algorithm", y="AUC", hue="Strategy", ci="sd")
-     plt.title("Comparison of Hyperparameter Strategies (AUC) on CloudTrail Logs")
-     plt.ylabel("Mean AUC")
-     plt.tight_layout()
-     plt.savefig("cloudtrail_comparison_auc.png")
-     plt.show()
-
-    # ----------------------------
-    # Step 9: Continue with Existing Steps (e.g., Evaluation & Visualization of Other Metrics)
-    # ----------------------------
-     print("\n🔬 Evaluating Models...")
-
-     scores = {}
-     for algo in algorithms:
-      if algo in experiment_results:
-            y_pred = (original_data.index.isin(experiment_results[algo])).astype(int)
-
-      else:
-            y_pred = np.zeros(len(original_data), dtype=int)
-        # Use your evaluate_model method here (assuming it's defined in your class)
-     scores[algo] = self.evaluate_model(y_true, y_pred)
-
-     scores_df = pd.DataFrame(scores).T
-     print("\n🔬 **Evaluation Results:**")
-     print(scores_df)
-     scores_df.to_csv("anomaly_detection_evaluation.csv", index=True)
-     print("✅ Evaluation results saved to 'anomaly_detection_evaluation.csv'.")
-
-     anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(process_df, original_data)
-
-     if anomaly_events is not None and not anomaly_events.empty:
             print("🚨 Anomalies Detected! Saving and mitigating...")
             print(anomaly_events[['EventName', 'Resources']].head())
 
@@ -1613,11 +1511,21 @@ class CloudTrailAnalyzer:
 
             # Mitigate anomalies
             self.mitigate_anomalies(anomaly_events)
-     else:
+            try:
+             save_anomalies_to_dynamodb(anomaly_events)
+             print("Anomalies saved to DynamoDB successfully.")
+            except Exception as e:
+             print("Failed to save anomalies to DynamoDB:", e)
+        else:
             print("✅ No anomalies found.")
+            anomaly_count = 0
+            anomalies_json =[]
             self.csv_output = "No anomalies found.\n"
-    
-     
 
-     # (Optional) Continue with additional steps like mitigation, etc.
-     return original_data
+
+        return {
+      "original_data": original_data.to_dict(orient='records'),
+      "anomaly_count": anomaly_count,
+      "csv_output": self.csv_output,
+      "anomalies_json": anomalies_json
+}

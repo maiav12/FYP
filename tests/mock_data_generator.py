@@ -7,6 +7,9 @@ import boto3
 import seaborn as sns
 import pandas as pd
 from matplotlib import pyplot as plt
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pyod.models.base")
+
 
 # Add the parent directory to the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -210,6 +213,7 @@ for evt in mock_events:
 
 if __name__ == "__main__":
     # 1) Create Analyzer
+    
     analyzer = CloudTrailAnalyzer()
     print("Using mock data for testing...")
 
@@ -225,8 +229,9 @@ if __name__ == "__main__":
     # print(results.head())
 
     if results is not None:
-        print(results[["EventName", "Username", "SourceIPAddress", "RiskScore", "RiskReasons"]].head())
-
+    # Assume your original data is stored under "original_data"
+     data_df = pd.DataFrame(results["original_data"])
+     print(data_df[["EventName", "Username", "SourceIPAddress", "RiskScore", "RiskReasons"]].head())
 # if __name__ == "__main__":
 #     analyzer = CloudTrailAnalyzer() 
 #     results = analyzer.run()
