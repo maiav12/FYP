@@ -1422,6 +1422,11 @@ class CloudTrailAnalyzer:
         
 
     def run(self):
+        import secrets
+
+        secret_key = secrets.token_hex(32)  # This generates a 64-character hexadecimal string
+        print(secret_key)
+
         print("🔍 Running CloudTrail Analysis...")
 
         # Step 1: Collect logs
@@ -1438,6 +1443,8 @@ class CloudTrailAnalyzer:
             original_data['Resources'] = original_data['Resources'].apply(
                 lambda x: json.loads(x) if isinstance(x, str) else x
             )
+        
+        self.X = process_df.to_numpy()  
 
         # Step 3: Compute dynamic risk weights
         weights = self.risk_analyzer.compute_dynamic_weights(original_data)
@@ -1447,7 +1454,8 @@ class CloudTrailAnalyzer:
         for idx, row in original_data.iterrows():
             score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
             original_data.at[idx, 'RiskScore'] = score
-            original_data.at[idx, 'RiskReasons'] = '; '.join(reasons)
+            original_data.at[idx, 'RiskReasons'] = '; '.join([str(v.get('message', '')) for v in reasons if isinstance(v, dict)])
+
             past_risk_scores.append(score)  # Store for forecasting
 
         # self.risk_analyzer.visualize_unusual_hours(original_data)
@@ -1482,8 +1490,12 @@ class CloudTrailAnalyzer:
         # ✅ Step 6: Compliance Check
         compliance_checker = ComplianceChecker()
         original_data['ComplianceReasons'] = original_data.apply(
-            lambda row: "; ".join(compliance_checker.check_all_compliance(row)), axis=1
-        )
+  lambda row: "; ".join(
+    [v if isinstance(v, str) else str(v.get('message', '')) for v in compliance_checker.check_all_compliance(row)]
+  ),
+  axis=1
+)
+
         original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
             lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
         )
@@ -1499,10 +1511,10 @@ class CloudTrailAnalyzer:
             print("🚨 Anomalies Detected! Saving and mitigating...")
             print(anomaly_events[['EventName', 'Resources']].head())
 
-            # Save to CSV
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            anomaly_events.to_csv(f"anomalies_{timestamp}.csv", index=False)
-            print(f"Anomalies saved to anomalies_{timestamp}.csv")
+            # # Save to CSV
+            # timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            # anomaly_events.to_csv(f"anomalies_{timestamp}.csv", index=False)
+            # print(f"Anomalies saved to anomalies_{timestamp}.csv")
 
             # Also create an in-memory CSV string for UI return
             csv_buffer = io.StringIO()

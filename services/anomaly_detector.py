@@ -2,6 +2,7 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
 from sklearn.model_selection import GridSearchCV
 import numpy as np
+from sklearn.tree import _tree 
 
 class AnomalyDetector:
     def __init__(self, contamination="auto", n_estimators=100):
@@ -62,3 +63,36 @@ class AnomalyDetector:
         # ✅ Step 6: Extract Anomalies
         anomaly_indices = np.where(anomaly_labels == -1)[0]
         return anomaly_indices, original_data.iloc[anomaly_indices]
+ 
+    def tree_to_json(self, tree_index=0):
+        """
+        Convert one tree from the Isolation Forest to a JSON structure.
+        """
+        # Ensure the isolation forest is trained
+        if not self.isolation_forest:
+            raise Exception("Isolation Forest is not trained.")
+
+        tree_estimator = self.isolation_forest.estimators_[tree_index]
+        tree = tree_estimator.tree_
+        
+        # Use PCA components count (if available) to generate feature names
+        n_components = self.pca.n_components_ if self.pca else tree_estimator.n_features_in_
+        feature_names = [f"PC{i+1}" for i in range(n_components)]
+        
+        def recurse(node):
+            if tree.feature[node] != _tree.TREE_UNDEFINED:
+                return {
+                    "node_id": int(node),
+                    "feature": feature_names[tree.feature[node]] if tree.feature[node] < len(feature_names) else tree.feature[node],
+                    "threshold": float(tree.threshold[node]),
+                    "left": recurse(tree.children_left[node]),
+                    "right": recurse(tree.children_right[node])
+                }
+            else:
+                return {
+                    "node_id": int(node),
+                    "leaf": True,
+                    "value": tree.value[node].tolist()
+                }
+        
+        return recurse(0)
