@@ -5,12 +5,14 @@ from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 import pandas as pd
 import time
+
+import pytz
 from anomaly_saver import convert_floats_to_decimal
 from main import CloudTrailAnalyzer
 from tests.mock_data_generator import generate_mock_data
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone 
 import math
 from boto3.dynamodb.conditions import Attr
 from sklearn.tree import _tree
@@ -21,15 +23,25 @@ import bcrypt
 from functools import wraps
 from dotenv import load_dotenv
 from services.compliance_checker import ComplianceChecker
-
+import threading 
+from services.data_processor import DataProcessor
+from services.risk_analyzer import RiskAnalyzer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+progress_data = {
+    "log": "",
+    "progress": 0,
+    "done": False
+}
+
+global_analysis_results = {}  # Now it's defined at the module level
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:3000"])
+risk_analyzer=RiskAnalyzer()
 
 app.config["JWT_SECRET_KEY"] = "72f4c48c0ff0a3f961329207785257c227828321a71569cf769e2f9a0ea05efc"
 jwt = JWTManager(app)
@@ -53,12 +65,23 @@ def get_severity(risk_score):
     else:
         return "Low"
 
+def convert_to_local(utc_time_str):
+    # Parse the ISO format timestamp
+    utc_dt = datetime.fromisoformat(utc_time_str)
+    # Assume the original timestamp is in UTC
+    utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    # Convert to desired timezone, e.g., Eastern Time
+    local_tz = pytz.timezone("America/New_York")
+    local_dt = utc_dt.astimezone(local_tz)
+    return local_dt.isoformat()
+
 def save_anomalies_to_dynamodb(anomaly_events):
     for index, row in anomaly_events.iterrows():
         try:
             event_time = row.get('EventTime')
             if isinstance(event_time, str):
-                event_time = datetime.strptime(event_time, '%Y-%m-%d %H:%M:%S').isoformat()
+    # Convert to local time before saving
+                event_time = convert_to_local(event_time)
             record_id = f"{index}-{datetime.now().isoformat()}"
             item = {
                 'id': record_id,
@@ -75,6 +98,54 @@ def save_anomalies_to_dynamodb(anomaly_events):
             logger.info(f"Saved anomaly: {row.get('EventName')}")
         except Exception as e:
             logger.error("Error saving anomaly: %s", e)
+import numpy as np
+
+def convert_np_types(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_np_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_types(item) for item in obj]
+    else:
+        return obj
+
+@app.route('/api/risk-report', methods=['GET'])
+def get_risk_report():
+    try:
+       mock_events = generate_mock_data()  # or real logs if you prefer
+       analyzer = CloudTrailAnalyzer()
+       analyzer.collect_logs = lambda: mock_events
+        
+       process_df, original_data = analyzer.data_processor.preprocess_logs(
+            mock_events, analyzer.unauthorized_api_calls
+        )
+       risk_report = risk_analyzer.generate_risk_exposure_report(original_data)
+        # Convert all np.int64/np.float64 values to native types.
+       risk_report = convert_np_types(risk_report)
+       return jsonify(risk_report)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/compliance/standards", methods=["GET"])
+def get_compliance_standards():
+    checker = ComplianceChecker()
+    return jsonify(checker.get_all_requirements()), 200
+
+@app.route("/api/compliance/assessment", methods=["GET"])
+def get_compliance_assessment():
+    global global_analysis_results
+    if "original_data_json" not in global_analysis_results:
+        return jsonify({"error": "No analysis data found yet. Please run analysis first."}), 400
+
+    event_dicts = global_analysis_results["original_data_json"]
+
+    checker = ComplianceChecker()
+    assessment = checker.get_compliance_assessment_for_events(event_dicts)
+    return jsonify(assessment), 200
+
 @app.route('/get_isolation_tree', methods=['POST'])
 def get_isolation_tree():
     try:
@@ -243,41 +314,103 @@ def get_all_anomalies():
 
 @app.route('/get_today_anomalies', methods=['GET'])
 def get_today_anomalies():
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
+     try:
+        # Use UTC if your EventTime is stored in UTC; adjust if using local time.
+        now = datetime.utcnow()
+        start_time = (now - timedelta(hours=24)).isoformat()
+        end_time = now.isoformat()
+
         response = table.scan(
-            FilterExpression=Attr('EventTime').begins_with(today)
+            FilterExpression=Attr('EventTime').between(start_time, end_time)
         )
         items = response.get("Items", [])
         return jsonify({"anomalies": items}), 200
-    except Exception as e:
-        logger.error("Error fetching today’s anomalies: %s", str(e))
+     except Exception as e:
+        logger.error("Error fetching last 24hr anomalies: %s", str(e))
         return jsonify({"error": str(e)}), 500
-@app.route('/run_analysis_start', methods=['POST'])
-def run_analysis():
-    global global_mitigation_log
+   
+def analysis_task():
+    global progress_data, global_mitigation_log, global_analysis_results
     try:
+        # Reset progress data
+        progress_data = {"log": "", "progress": 0, "done": False}
+
+        # Step 1: Collect Logs
+        progress_data["log"] = "Step 1/6: Collecting logs from AWS CloudTrail..."
+        progress_data["progress"] = 5
         mock_events = generate_mock_data()  # or real events
+        time.sleep(1)  # simulate some delay
+
+        # Step 2: Preprocessing Data
+        progress_data["log"] = "Step 2/6: Preprocessing data (cleaning, feature extraction)..."
+        progress_data["progress"] = 15
         analyzer = CloudTrailAnalyzer()
         analyzer.collect_logs = lambda: mock_events
-        results = analyzer.run()  # This method runs analysis and automatically mitigates anomalies
+        # Optionally: process_df, original_data = analyzer.data_processor.preprocess_logs(...)
+        time.sleep(2)  # simulate delay
+
+        # Step 3: Applying PCA
+        progress_data["log"] = "Step 3/6: Applying PCA for dimensionality reduction..."
+        progress_data["progress"] = 30
+        # Suppose analyzer.run() internally applies PCA
+        time.sleep(2)  # simulate delay
+
+        # Step 4: Tuning Hyperparameters
+        progress_data["log"] = "Step 4/6: Tuning hyperparameters for Isolation Forest..."
+        progress_data["progress"] = 45
+        time.sleep(2)  # simulate delay
+
+        # Step 5: Detecting Anomalies
+        progress_data["log"] = "Step 5/6: Detecting anomalies..."
+        progress_data["progress"] = 60
+        results = analyzer.run() 
+        anomalies_df = results.get("anomalies_df")  # Get the DataFrame if it exists
+        if anomalies_df is not None:
+         anomalies_json = anomalies_df.to_dict(orient='records')
+         for anomaly in anomalies_json:
+            table.put_item(Item={
+            "EventId": anomaly.get("EventId"),
+            "EventTime": anomaly.get("EventTime"),
+            "EventName": anomaly.get("EventName"),
+            "Username": anomaly.get("Username"),
+            "SourceIPAddress": anomaly.get("SourceIPAddress"),
+            "RiskScore": float(anomaly.get("RiskScore", 0)),
+            "RiskReasons": anomaly.get("RiskReasons", []),
+            "ComplianceCheck": anomaly.get("ComplianceCheck", ""),
+            "Resources": anomaly.get("Resources", {}),
+            "BreachNotification": anomaly.get("BreachNotification", "")
+        })
+
+        else:
+            anomalies_json = results.get("anomalies_json", [])
+      
+ # heavy processing step that returns a dictionary of results
         global_mitigation_log = analyzer.mitigation_log
-       
+        time.sleep(2)  # simulate delay
+
+        # Step 6: Mitigating Anomalies
+        progress_data["log"] = "Step 6/6: Mitigating anomalies (applying auto-remediation)..."
+        progress_data["progress"] = 80
+        time.sleep(2)  # simulate delay
+
+        # Final Step: Finalizing Results and Saving Audit Record
+        progress_data["log"] = "Finalizing results and saving audit record..."
+        progress_data["progress"] = 90
+        time.sleep(2)  # simulate delay
+        
+        # Compute final results:
         anomaly_count = results.get("anomaly_count", 0)
+        last_run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         anomalies_json = results.get("anomalies_json", [])
         if hasattr(anomalies_json, "to_dict"):
             anomalies_json = anomalies_json.to_dict(orient='records')
        
-        last_run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-       
-        # Process csv_output in case it is a list of dictionaries.
+        # Optionally, process csv_output if needed
         csv_output = results.get("csv_output", "")
         if isinstance(csv_output, list):
-            # Debug: print the type of items in csv_output.
-            for i, item in enumerate(csv_output):
-                logger.info("csv_output[%d] type: %s", i, type(item))
             csv_output = "\n".join([json.dumps(item, default=str) for item in csv_output])
        
+        # Save audit record (if needed)
         audit_record = {
             'id': f"{last_run_timestamp}-{anomaly_count}",
             'timestamp': last_run_timestamp,
@@ -288,20 +421,30 @@ def run_analysis():
         }
         audit_table.put_item(Item=audit_record)
         logger.info("Audit record saved: %s", audit_record['id'])
-       
-        return jsonify({
-            "message": "Analysis complete!",
+        
+        # Save final results into global_analysis_results so the client can display them
+        global_analysis_results = {
             "anomaly_count": anomaly_count,
-            "data": anomalies_json,
-            "last_run_timestamp": last_run_timestamp
-        }), 200
+            "last_run_timestamp": last_run_timestamp,
+            "anomalies_json": anomalies_json,
+            "original_data_json":results.get("original_data_json", [])
+        }
+       
+        progress_data["log"] = "Analysis complete! All steps finished successfully."
+        progress_data["progress"] = 100
+        progress_data["done"] = True
     except Exception as e:
-        logger.error("Error in /run_analysis_start: %s", str(e))
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        progress_data["log"] = f"Error during analysis: {str(e)}"
+        progress_data["done"] = True
 
+@app.route('/run_analysis_start', methods=['POST'])
 
+def run_analysis_start():
+    global progress_data
+    progress_data = {"log": "", "progress": 0, "done": False}
+    thread = threading.Thread(target=analysis_task)
+    thread.start()
+    return jsonify({"message": "Analysis started"}), 200
 
 # New endpoint: Retrieve full audit trail
 @app.route('/get_audit_trail', methods=['GET'])
@@ -395,24 +538,84 @@ def get_compliance_data():
         print("Error in /get_compliance_data:", e)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
-
-    
 @app.route("/analysis_progress")
 def analysis_progress():
     def generate():
-        steps = [
-            "Collecting logs...",
-            "Preprocessing data...",
-            "Running PCA...",
-            "Tuning hyperparameters...",
-            "Detecting anomalies..."
-        ]
-        for step in steps:
-            yield f"data: {step}\n\n"
-            time.sleep(2)
+        global progress_data, global_analysis_results
+        last_log = None
+        last_progress = None
+        while not progress_data.get("done"):
+            current_log = progress_data.get("log")
+            current_progress = progress_data.get("progress")
+            if current_log != last_log or current_progress != last_progress:
+                yield f"data: {json.dumps(progress_data)}\n\n"
+                last_log = current_log
+                last_progress = current_progress
+            time.sleep(1)
+        # Merge final results into the last event
+        final_data = {**progress_data, **global_analysis_results}
+        yield f"data: {json.dumps(final_data, default=str)}\n\n"
+
         yield "event: done\ndata: Analysis complete!\n\n"
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
+@app.route('/get_impact_analysis', methods=['GET'])
+def get_impact_analysis():
+    try:
+        # Sample data for testing (or replace with your actual data retrieval)
+        sample_events = [
+            {
+                "EventName": "DeleteBucket",
+                "Username": "user1",
+                "SourceIPAddress": "192.168.1.1",
+                "EventTime": "2025-03-12T20:00:00Z",
+                "EventId": "evt1",
+                "CloudTrailEvent": "{\"detail\": \"sample\"}",
+                "Resources": {"S3BucketName": "example-bucket"},
+                "FailedLogin": 0,
+                "EventFrequency": 10,
+                "UpperThreshold": 12,
+                "UserEventFrequency": 5,
+                "UserThreshold": 6,
+                "IPEventFrequency": 3,
+                "IPThreshold": 4,
+                "FailedLoginAttempts": 0,
+                "SensitiveDataAccess": 0,
+                "Hour": 20
+            },
+            {
+                "EventName": "StopInstances",
+                "Username": "user2",
+                "SourceIPAddress": "192.168.1.2",
+                "EventTime": "2025-03-12T20:05:00Z",
+                "EventId": "evt2",
+                "CloudTrailEvent": "{\"detail\": \"sample2\"}",
+                "Resources": {"S3BucketName": "another-bucket"},
+                "FailedLogin": 2,
+                "EventFrequency": 15,
+                "UpperThreshold": 16,
+                "UserEventFrequency": 7,
+                "UserThreshold": 8,
+                "IPEventFrequency": 4,
+                "IPThreshold": 5,
+                "FailedLoginAttempts": 4,
+                "SensitiveDataAccess": 1,
+                "Hour": 20
+            }
+        ]
+        unauthorized_api_calls = {"DeleteBucket", "StopInstances", "DetachPolicy"}
+        data_processor = DataProcessor()
+        process_df, full_df = data_processor.preprocess_logs(sample_events, unauthorized_api_calls)
+        if full_df.empty:
+            return jsonify({"error": "No log data found"}), 404
+
+        risk_analyzer = RiskAnalyzer()
+        # Use the new method
+        impact_report = risk_analyzer.generate_risk_exposure_report(full_df, risk_threshold=50)
+        return jsonify(impact_report), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/login", methods=["POST"])
 def login():

@@ -1,10 +1,12 @@
+# models/compliance.py
+
 class ComplianceRequirements:
-    """Base class for compliance requirements"""
+    """Base class for compliance requirements."""
     def __init__(self):
         self.requirements = {}
 
 class GDPRRequirements(ComplianceRequirements):
-    """GDPR specific requirements"""
+    """GDPR specific requirements."""
     def __init__(self):
         super().__init__()
         self.requirements = {
@@ -24,18 +26,17 @@ class GDPRRequirements(ComplianceRequirements):
             "accountability": "Designate a Data Protection Officer (DPO) if necessary, and ensure regular compliance reviews and assessments."
         }
 
-
 class NIS2Requirements(ComplianceRequirements):
-    """NIS2 specific requirements"""
+    """NIS2 specific requirements."""
     def __init__(self):
         super().__init__()
         self.requirements = {
-            "incident_reporting": "Track and report incidents to regulatory bodies within predefined timeframes",
+            "incident_reporting": "Track and report incidents to regulatory bodies within predefined timeframes.",
             "vulnerability_management": "Implement an ongoing vulnerability management program to identify, assess, and patch vulnerabilities within defined timeframes.",
             "critical_infra_protection": "Protect critical cloud resources from unauthorized access, ensuring strict access controls and protection against DDoS attacks.",
             "network_security": "Implement robust network security measures, including firewalls, intrusion detection systems (IDS), and intrusion prevention systems (IPS).",
             "business_continuity_planning": "Establish business continuity and disaster recovery plans, ensuring regular testing and compliance with recovery time objectives.",
-            "access_management": "Implement strong access management, including role-based access control (RBAC), privileged access management (PAM).",
+            "access_management": "Implement strong access management, including role-based access control (RBAC) and privileged access management (PAM).",
             "supplier_management": "Ensure that third-party suppliers comply with NIS2 requirements and manage the risks associated with external dependencies.",
             "monitoring_and_detection": "Implement continuous monitoring and detection of cybersecurity threats."
         }

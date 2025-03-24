@@ -1,203 +1,121 @@
+# services/compliance_checker.py
+
 import json
-import boto3
+from datetime import datetime
 from models.compliance import GDPRRequirements, NIS2Requirements
-
-def parse_cloudtrail_event(event):
-    """
-    Ensures that the CloudTrailEvent is a dictionary.
-    If it's a JSON string, parse it; if it's already a dict, return as is.
-    Otherwise, return an empty dict.
-    """
-    cte = event.get('CloudTrailEvent', {})
-    if isinstance(cte, str):
-        try:
-            return json.loads(cte)
-        except Exception as e:
-            print("Error parsing CloudTrailEvent:", e)
-            return {}
-    elif isinstance(cte, dict):
-        return cte
-    return {}
-
-class ComplianceRule:
-    def __init__(self, regulation, key, message, severity, condition):
-        """
-        regulation: e.g., "GDPR" or "NIS2".
-        key: Unique rule identifier.
-        message: Descriptive violation message.
-        severity: e.g., "High", "Medium", "Low".
-        condition: A callable that accepts an event and returns True if violation exists.
-        """
-        self.regulation = regulation
-        self.key = key
-        self.message = message
-        self.severity = severity
-        self.condition = condition
-
-    def check(self, event):
-        if self.condition(event):
-            return {
-                "regulation": self.regulation,
-                "rule": self.key,
-                "message": self.message,
-                "severity": self.severity
-            }
-        return None
 
 class ComplianceChecker:
     def __init__(self):
-        self.gdpr = GDPRRequirements().requirements
-        self.nis2 = NIS2Requirements().requirements
-        self.s3 = boto3.client('s3')
+        self.gdpr = GDPRRequirements()
+        self.nis2 = NIS2Requirements()
+
+        # A list of rules your compliance checker will iterate over
         self.rules = []
         self._load_rules()
 
     def _load_rules(self):
-        # GDPR Rules
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="data_encryption",
-            message=self.gdpr.get('data_encryption', "Data must be encrypted at rest and in transit."),
-            severity="High",
-            condition=lambda event: event.get('encrypted') is False
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="access_control",
-            message=self.gdpr.get('access_control', "Access control measures must be implemented."),
-            severity="Medium",
-            condition=lambda event: event.get('Username', '').strip() in ["", "Unknown"]
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="data_minimization",
-            message=self.gdpr.get('data_minimization', "Data minimization should be observed."),
-            severity="Low",
-            condition=lambda event: (
-                event.get('EventName') in ["LaunchInstance", "TerminateInstances"] and
-                len(parse_cloudtrail_event(event).get('data', [])) > 5
-            )
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="breach_notifications",
-            message=self.gdpr.get('breach_notifications', "Breach notifications must be issued."),
-            severity="High",
-            condition=lambda event: event.get('DataBreachDetected', False) is True
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="consent_management",
-            message=self.gdpr.get('consent_management', "Consent must be obtained."),
-            severity="Medium",
-            condition=lambda event: event.get('ConsentGiven') is False
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="data_retention",
-            message=self.gdpr.get('data_retention', "Data retention period should not exceed 365 days."),
-            severity="Low",
-            condition=lambda event: (event.get('DataRetentionPeriod') is not None and event.get('DataRetentionPeriod') > 365)
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="audit_trail",
-            message=self.gdpr.get('audit_trail', "Audit logs must be maintained."),
-            severity="Medium",
-            condition=lambda event: 'audit_failure' in event.get('AuditLog', {})
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="GDPR",
-            key="data_subject_rights",
-            message=self.gdpr.get('data_subject_rights', "Data subject requests must be honored."),
-            severity="High",
-            condition=lambda event: event.get('DataSubjectRequest') == 'Denied'
-        ))
-        # NIS2 Rules
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="incident_reporting",
-            message=self.nis2.get('incident_reporting', "Incident reporting is required."),
-            severity="High",
-            condition=lambda event: (
-                event.get('EventName') in ["StopInstances", "DeleteBucket", "ModifyNetworkAcl"] and
-                (event.get('EventName') != "DeleteBucket" or not self._has_deny_deletebucket(event))
-            )
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="vulnerability_management",
-            message=self.nis2.get('vulnerability_management', "Vulnerability management must be enforced."),
-            severity="High",
-            condition=lambda event: (
-                event.get('EventName') in ["LaunchInstance", "StopInstances"] and
-                'critical_vuln' in parse_cloudtrail_event(event)
-            )
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="critical_infra_protection",
-            message=self.nis2.get('critical_infra_protection', "Critical infrastructure must be protected."),
-            severity="High",
-            condition=lambda event: event.get('CriticalResourceAccessed', False)
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="network_security",
-            message=self.nis2.get('network_security', "Firewall and network security must be enabled."),
-            severity="Medium",
-            condition=lambda event: not event.get('FirewallEnabled', False)
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="business_continuity_planning",
-            message=self.nis2.get('business_continuity_planning', "Business continuity plans must be tested."),
-            severity="Medium",
-            condition=lambda event: not event.get('BCPTested', False)
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="access_management",
-            message=self.nis2.get('access_management', "Unauthorized access must be prevented."),
-            severity="High",
-            condition=lambda event: 'unauthorized_access' in event.get('AccessLog', {})
-        ))
-        self.rules.append(ComplianceRule(
-            regulation="NIS2",
-            key="monitoring_and_detection",
-            message=self.nis2.get('monitoring_and_detection', "Monitoring must be enabled."),
-            severity="Medium",
-            condition=lambda event: not event.get('MonitoringEnabled', False)
-        ))
+        """
+        Load or define all the GDPR and NIS2 rules you want to check.
+        Each rule is a dict with:
+          - 'regulation': e.g. 'GDPR' or 'NIS2'
+          - 'key': A unique identifier (e.g. 'data_encryption')
+          - 'message': Short explanation of violation
+          - 'condition': A callable that returns True if the event violates the rule
+        """
+        # For example, if 'data_encryption' is in your GDPR requirements
+        if "data_encryption" in self.gdpr.requirements:
+            self.rules.append({
+                "regulation": "GDPR",
+                "key": "data_encryption",
+                "message": "Data encryption is not enforced on data at rest or in transit.",
+                "condition": lambda event: (
+                    event.get("CloudTrailEvent", {})
+                         .get("requestParameters", {})
+                         .get("encrypted", True) is False
+                )
+            })
 
-    def _has_deny_deletebucket(self, event):
-        resources = event.get('Resources', {})
-        bucket_name = resources.get('S3BucketName')
-        if not bucket_name:
-            return False
-        try:
-            policy_response = self.s3.get_bucket_policy(Bucket=bucket_name)
-            policy_str = policy_response.get('Policy', '{}')
-            policy = json.loads(policy_str)
-        except self.s3.exceptions.NoSuchBucketPolicy:
-            return False
-        except self.s3.exceptions.ClientError:
-            return False
+        # If 'access_control' is in GDPR
+        if "access_control" in self.gdpr.requirements:
+            self.rules.append({
+                "regulation": "GDPR",
+                "key": "access_control",
+                "message": "Access control measures may be insufficient (missing username).",
+                "condition": lambda event: not event.get("Username")
+            })
 
-        for stmt in policy.get('Statement', []):
-            if stmt.get('Effect') == 'Deny':
-                actions = stmt.get('Action', [])
-                if isinstance(actions, str):
-                    actions = [actions]
-                if "s3:DeleteBucket" in actions:
-                    return True
-        return False
+        # If 'incident_reporting' is in NIS2
+        if "incident_reporting" in self.nis2.requirements:
+            self.rules.append({
+                "regulation": "NIS2",
+                "key": "incident_reporting",
+                "message": "Incident was not properly reported per NIS2 guidelines.",
+                "condition": lambda event: (
+                    event.get("SecurityIncident") is True
+                    and not event.get("IncidentReported")
+                )
+            })
 
-    def check_all_compliance(self, event):
-        """Check an event against all compliance rules and return a list of violations."""
+        # ...Add more for the other GDPR/NIS2 keys you want to enforce
+
+    def check_all_compliance(self, event_dict):
+        """
+        Checks a single event (dict) against all the loaded rules.
+        Returns a list of violations found.
+        """
         violations = []
         for rule in self.rules:
-            result = rule.check(event)
-            if result:
-                violations.append(result)
+            if rule["condition"](event_dict):
+                violations.append({
+                    "regulation": rule["regulation"],
+                    "ruleId": rule["key"],
+                    "message": rule["message"],
+                    "timestamp": datetime.utcnow().isoformat()
+                })
         return violations
+
+    def get_compliance_assessment_for_events(self, events):
+        """
+        Checks a list of events for any rule violations, then computes a
+        compliance score EXACTLY like your original code did:
+          score = ((total_requirements - violated_count) / total_requirements) * 100
+        """
+        # 1) Collect all violations from all events
+        all_violations = []
+        for evt in events:
+            # If the CloudTrailEvent is a JSON string, parse it
+            if isinstance(evt.get("CloudTrailEvent"), str):
+                try:
+                    evt["CloudTrailEvent"] = json.loads(evt["CloudTrailEvent"])
+                except json.JSONDecodeError:
+                    evt["CloudTrailEvent"] = {}
+
+            # Check compliance for this single event
+            violations = self.check_all_compliance(evt)
+            if violations:
+                all_violations.extend(violations)
+
+        # 2) Same formula as your old code
+        #    total_requirements = number of GDPR + NIS2 items
+        total_requirements = len(self.gdpr.requirements) + len(self.nis2.requirements)
+        violated_count = len(all_violations)  # total number of found violations
+
+        if total_requirements > 0:
+            score = ((total_requirements - violated_count) / total_requirements) * 100
+        else:
+            score = 100  # If no rules at all, assume 100% compliance by default
+
+        return {
+            "score": round(score, 2),
+            "violations": all_violations
+        }
+
+    def get_all_requirements(self):
+        """
+        (Optional) If your /api/compliance/standards endpoint needs a dictionary of
+        textual requirements for the UI, you can return them here.
+        """
+        return {
+            "GDPR": self.gdpr.requirements,
+            "NIS2": self.nis2.requirements
+        }

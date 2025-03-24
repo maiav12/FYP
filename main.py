@@ -10,7 +10,7 @@ import boto3
 import json
 from datetime import datetime
 
-
+from botocore.exceptions import ClientError
 import pandas as pd
 from anomaly_saver import save_anomalies_to_dynamodb
 from services.data_processor import DataProcessor
@@ -19,6 +19,20 @@ from services.risk_analyzer import RiskAnalyzer
 from services.compliance_checker import ComplianceChecker
 sns = boto3.client('sns')
 topic_arn = 'arn:aws:sns:eu-north-1:699475953257:cloudtrail-alerts'
+# In your main class or a dedicated configuration file
+MITIGATION_EFFECTIVENESS = {
+    'CreateBucket': 0.1,  # e.g., 10% effective
+    'StopInstances': 0.4,  # 40% effective
+    'AuthorizeSecurityGroupIngress': 0.3,
+    'PutObject': 0.2,
+    'StartInstances': 0.35,
+    'DescribeInstances': 0.1,
+    'AttachVolume': 0.25,
+    'DetachVolume': 0.25,
+    'DeleteBucket': 0.5,
+    'GetObject': 0.15,
+    'ListBuckets': 0.1
+}
 
 class RiskForecaster:
     def __init__(self):
@@ -85,6 +99,7 @@ class RiskForecaster:
     #         print(f"Error visualizing risk trend: {e}")
 
 class CloudTrailAnalyzer:
+    
     def __init__(self):
         self.cloudtrail = boto3.client('cloudtrail')
         self.unauthorized_api_calls = {"DeleteBucket", "StopInstances", "DetachPolicy"}
@@ -107,7 +122,9 @@ class CloudTrailAnalyzer:
      'DeleteBucket': self.prevent_bucket_deletion,
      'GetObject': self.prevent_object_access,
      'ListBuckets': self.limit_bucket_listing_permissions,
+    'LookupEvents': self.handle_lookup_events ,
 }
+        
         self.mitigation_log = []
 
 
@@ -123,7 +140,7 @@ class CloudTrailAnalyzer:
           print("Notification sent. Response:", response)
       
         except Exception as e: print(f"Failed to send notification: {e}")
-
+    
     def collect_logs(self):
      
      """Collect CloudTrail logs from AWS."""
@@ -142,59 +159,45 @@ class CloudTrailAnalyzer:
  
     def mitigate_anomalies(self, anomalies):
      for _, anomaly in anomalies.iterrows():
-        # Convert anomaly to JSON-serializable dictionary
         anomaly_dict = anomaly.to_dict()
-        anomaly_dict = {k: (v.isoformat() if isinstance(v, pd.Timestamp) else v) for k, v in anomaly_dict.items()}
-        
+        anomaly_dict = {k: (v.isoformat() if isinstance(v, pd.Timestamp) else v) 
+                        for k, v in anomaly_dict.items()}
         anomaly_id = hash(json.dumps(anomaly_dict, sort_keys=True))
         if anomaly_id in self.mitigated_anomalies:
             print(f"Anomaly {anomaly_id} already mitigated. Skipping.")
-            # No email on second pass
             continue
 
         self.mitigated_anomalies.add(anomaly_id)
         event_name = anomaly['EventName']
         mitigation_handler = self.mitigation_actions.get(event_name)
-        if event_name == "CreateBucket":
-            # Special case: we only want a minimal email with "Bucket X was created by user Y."
-            action_result = mitigation_handler(anomaly)  # notify_admin_bucket_creation
-            # This method can call `self.notify_admin` itself or simply return the string
-            # Then we skip the standard "before/after" email
-            # Mark anomaly as mitigated
-            self.mitigated_anomalies.add(anomaly_id)
-            continue
+        
+        # Retrieve effectiveness from our central mapping
+        effectiveness = MITIGATION_EFFECTIVENESS.get(event_name, 0)  # Default to 0 if not defined
+
         if mitigation_handler:
             try:
-                # Log the state before mitigation
                 before_state = self.get_resource_state(anomaly)
                 print(f"Before mitigation: {before_state}")
 
-                # Execute the mitigation action AND CAPTURE THE RESULT
-                print(f"Mitigating anomaly: {event_name}")
-                action_result = mitigation_handler(anomaly)  # <-- capture the returned string
+                action_result = mitigation_handler(anomaly)  # Execute mitigation
 
-                # Log the state after mitigation
                 after_state = self.get_resource_state(anomaly)
                 print(f"After mitigation: {after_state}")
 
-                # Record mitigation details
+                # Record mitigation details, including effectiveness
                 self.mitigation_log.append({
                     'EventName': event_name,
                     'AnomalyDetails': anomaly_dict,
                     'BeforeState': before_state,
                     'AfterState': after_state,
                     'ActionResult': action_result,
+                    'Effectiveness': effectiveness,  # Record the effectiveness value
                     'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
 
-                # Include the 'action_result' in the email
                 self.notify_admin(
-                    message=(
-                        f"Mitigation action executed for anomaly: {event_name}.\n"
-                        f"{action_result}\n"            # <--- inserted here
-                        f"Before: {before_state}\n"
-                        f"After: {after_state}"
-                    ),
+                    message=(f"Mitigation executed for anomaly: {event_name}.\n"
+                             f"{action_result}\nBefore: {before_state}\nAfter: {after_state}"),
                     subject="Anomaly Mitigation Report"
                 )
             except Exception as e:
@@ -205,11 +208,6 @@ class CloudTrailAnalyzer:
                 )
         else:
             print(f"No predefined action for anomaly: {event_name}. Tagging for manual review.")
-            # self.tag_anomaly_for_review(anomaly)
-            # self.notify_admin(
-                # message=f"Anomaly detected with no predefined action: {event_name}. Tagged for review.",
-                # subject="Manual Review Required"
-            # )
 
 
 
@@ -237,13 +235,12 @@ class CloudTrailAnalyzer:
                     # 1) Check if the bucket exists
                     s3.head_bucket(Bucket=bucket_name)
                     bucket_exists = True
-                except s3.exceptions.ClientError as e:
-                    if e.response['Error']['Code'] == '404':
+                except ClientError as e:
+                    error_code = e.response['Error'].get('Code', '')
+                    if error_code == '404' or error_code == 'NoSuchBucket':
                         bucket_exists = False
                     else:
                         return f"Error checking bucket {bucket_name}: {e}"
-
-                # If bucket doesn't exist, we can just note that
                 if not bucket_exists:
                     return f"Bucket {bucket_name} does not exist."
 
@@ -252,11 +249,10 @@ class CloudTrailAnalyzer:
                     response = s3.get_bucket_policy(Bucket=bucket_name)
                     policy_str = response.get('Policy', '{}')
                     policy = json.loads(policy_str)
-                except s3.exceptions.from_code('NoSuchBucketPolicy'):
-                    # If there's no policy at all, just note it
-                    policy = {"Statement": []}
-                except s3.exceptions.ClientError as e:
-                    if e.response['Error']['Code'] == 'NoSuchBucketPolicy':
+                except ClientError as e:
+                    error_code = e.response['Error'].get('Code', '')
+                     # If no bucket policy is set, assume an empty policy.
+                    if error_code in ['NoSuchBucketPolicy', 'NoSuchBucket']:
                         policy = {"Statement": []}
                     else:
                         return f"Error fetching policy for bucket {bucket_name}: {e}"
@@ -771,6 +767,15 @@ class CloudTrailAnalyzer:
             subject="Mitigation Failure"
         )
         return error_msg
+    def handle_lookup_events(self, anomaly):
+   
+     print("Handling 'LookupEvents' anomaly.")
+     # E.g., notify admin:
+     self.notify_admin(
+       message="Suspicious LookupEvents call flagged. Manual investigation required.",
+       subject="LookupEvents Anomaly Detected"
+     )
+     return "LookupEvents anomaly handled."
 
     def notify_admin_bucket_creation(self, anomaly):
         bucket_name = anomaly.get('Resources', {}).get('S3BucketName', 'Unknown')
@@ -856,7 +861,19 @@ class CloudTrailAnalyzer:
         )
         return error_msg
 
-
+    def get_s3_bucket_policy(bucket_name):
+     s3 = boto3.client("s3")
+     try:
+        response = s3.get_bucket_policy(Bucket=bucket_name)
+        return json.loads(response["Policy"])
+     except ClientError as e:
+        error_code = e.response["Error"].get("Code", "")
+        if error_code == "NoSuchBucketPolicy":
+            return {}  # No policy exists, return empty
+        elif error_code == "NoSuchBucket":
+            return {"error": f"Bucket {bucket_name} does not exist"}
+        else:
+            raise e  # Raise other exceptions
     def prevent_object_access(self, anomaly):
      bucket_name = anomaly.get('Resources', {}).get('S3BucketName')
      object_key = anomaly.get('Resources', {}).get('ObjectKey')
@@ -1419,125 +1436,119 @@ class CloudTrailAnalyzer:
         )
         return error_msg
 
-        
-
     def run(self):
-        import secrets
+     import secrets
 
-        secret_key = secrets.token_hex(32)  # This generates a 64-character hexadecimal string
-        print(secret_key)
+     secret_key = secrets.token_hex(32)  # This generates a 64-character hexadecimal string
+     print(secret_key)
 
-        print("🔍 Running CloudTrail Analysis...")
+     print("🔍 Running CloudTrail Analysis...")
 
-        # Step 1: Collect logs
-        events = self.collect_logs()
+    # Step 1: Collect logs
+     events = self.collect_logs()
 
-        # Step 2: Preprocess logs
-        process_df, original_data = self.data_processor.preprocess_logs(
-            events,
-            self.unauthorized_api_calls
+    # Step 2: Preprocess logs
+     process_df, original_data = self.data_processor.preprocess_logs(
+        events,
+        self.unauthorized_api_calls
+    )
+
+    # Ensure 'Resources' column is correctly formatted
+     if 'Resources' in original_data.columns:
+        original_data['Resources'] = original_data['Resources'].apply(
+            lambda x: json.loads(x) if isinstance(x, str) else x
         )
+    
+     self.X = process_df.to_numpy()  
 
-        # Ensure 'Resources' column is correctly formatted
-        if 'Resources' in original_data.columns:
-            original_data['Resources'] = original_data['Resources'].apply(
-                lambda x: json.loads(x) if isinstance(x, str) else x
-            )
-        
-        self.X = process_df.to_numpy()  
+    # Step 3: Compute dynamic risk weights
+     weights = self.risk_analyzer.compute_dynamic_weights(original_data)
 
-        # Step 3: Compute dynamic risk weights
-        weights = self.risk_analyzer.compute_dynamic_weights(original_data)
-
-        # Step 4: Calculate risk scores
-        past_risk_scores = []
-        for idx, row in original_data.iterrows():
-            score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
-            original_data.at[idx, 'RiskScore'] = score
-            original_data.at[idx, 'RiskReasons'] = '; '.join([str(v.get('message', '')) for v in reasons if isinstance(v, dict)])
-
-            past_risk_scores.append(score)  # Store for forecasting
-
-        # self.risk_analyzer.visualize_unusual_hours(original_data)
-
-        # ✅ Step 5: Predict Future Risks
-        risk_forecaster = RiskForecaster()
-        if past_risk_scores:
-            print("📊 Training risk forecasting model...")
-            risk_forecaster.train_model(past_risk_scores)
-            future_risks = risk_forecaster.predict_future_risk(steps=10)
-
-            # Visualize the risk trend
-#            risk_forecaster.visualize_risk_trend(past_risk_scores, future_risks)
-
-            # Save Predictions for comparison later
-            future_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(future_risks), freq='H')
-            predicted_risks_df = pd.DataFrame({
-                "Time": future_timestamps,
-                "PredictedRiskScore": future_risks
-            })
-            predicted_risks_df.to_csv("predicted_risk_scores.csv", index=False)
-            print("🔮 Predicted Risk Scores saved.")
-
-            # Check max predicted risk and trigger alert if needed
-            predicted_risk = max(future_risks) if any(future_risks) else 0
-            risk_threshold = 50
-            if predicted_risk > risk_threshold:
-                alert_message = f"🚨 Future Risk Alert: Predicted risk score of {predicted_risk} exceeds threshold!"
-                print(alert_message)
-                self.notify_admin(alert_message, subject="High Risk Prediction")
-
-        # ✅ Step 6: Compliance Check
-        compliance_checker = ComplianceChecker()
-        original_data['ComplianceReasons'] = original_data.apply(
-  lambda row: "; ".join(
-    [v if isinstance(v, str) else str(v.get('message', '')) for v in compliance_checker.check_all_compliance(row)]
-  ),
-  axis=1
-)
-
-        original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
-            lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
+    # Step 4: Calculate risk scores for all events
+     past_risk_scores = []
+     for idx, row in original_data.iterrows():
+        score, reasons = self.risk_analyzer.calculate_risk_score(row, weights)
+        original_data.at[idx, 'RiskScore'] = score
+        original_data.at[idx, 'RiskReasons'] = '; '.join(
+            [str(v.get('message', '')) for v in reasons if isinstance(v, dict)]
         )
+        past_risk_scores.append(score)  # Store for forecasting
 
-        # ✅ Step 7: Detect anomalies
-        anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(process_df, original_data)
+    # Generate and display the risk report AFTER computing all risk scores.
+     risk_report = self.risk_analyzer.generate_risk_exposure_report(original_data)
+     print(":")
+     print(risk_report)
 
-        if anomaly_events is not None and not anomaly_events.empty:
-            anomaly_count = len(anomaly_events)
-            anomalies_json = anomaly_events.to_dict(orient='records')
-            print("🚨 Anomalies Detected! Count:", anomaly_count)
+    # ✅ Step 5: Predict Future Risks
+     risk_forecaster = RiskForecaster()
+     if past_risk_scores:
+        print("📊 Training risk forecasting model...")
+        risk_forecaster.train_model(past_risk_scores)
+        future_risks = risk_forecaster.predict_future_risk(steps=10)
 
-            print("🚨 Anomalies Detected! Saving and mitigating...")
-            print(anomaly_events[['EventName', 'Resources']].head())
+        # Visualize the risk trend
+        # risk_forecaster.visualize_risk_trend(past_risk_scores, future_risks)
 
-            # # Save to CSV
-            # timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            # anomaly_events.to_csv(f"anomalies_{timestamp}.csv", index=False)
-            # print(f"Anomalies saved to anomalies_{timestamp}.csv")
+        # Save Predictions for comparison later
+        future_timestamps = pd.date_range(start=pd.Timestamp.now(), periods=len(future_risks), freq='H')
+        predicted_risks_df = pd.DataFrame({
+            "Time": future_timestamps,
+            "PredictedRiskScore": future_risks
+        })
+        predicted_risks_df.to_csv("predicted_risk_scores.csv", index=False)
+        print("🔮 Predicted Risk Scores saved.")
 
-            # Also create an in-memory CSV string for UI return
-            csv_buffer = io.StringIO()
-            anomaly_events.to_csv(csv_buffer, index=False)
-            self.csv_output = csv_buffer.getvalue()
+        # Check max predicted risk and trigger alert if needed
+        predicted_risk = max(future_risks) if any(future_risks) else 0
+        risk_threshold = 50
+        if predicted_risk > risk_threshold:
+            alert_message = f"🚨 Future Risk Alert: Predicted risk score of {predicted_risk} exceeds threshold!"
+            print(alert_message)
+            self.notify_admin(alert_message, subject="High Risk Prediction")
 
-            # Mitigate anomalies
-            self.mitigate_anomalies(anomaly_events)
-            try:
-             save_anomalies_to_dynamodb(anomaly_events)
-             print("Anomalies saved to DynamoDB successfully.")
-            except Exception as e:
-             print("Failed to save anomalies to DynamoDB:", e)
-        else:
-            print("✅ No anomalies found.")
-            anomaly_count = 0
-            anomalies_json =[]
-            self.csv_output = "No anomalies found.\n"
+    # ✅ Step 6: Compliance Check
+     compliance_checker = ComplianceChecker()
+     original_data['ComplianceReasons'] = original_data.apply(
+        lambda row: "; ".join(
+            [v if isinstance(v, str) else str(v.get('message', '')) for v in compliance_checker.check_all_compliance(row)]
+        ),
+        axis=1
+    )
+     original_data['ComplianceCheck'] = original_data['ComplianceReasons'].apply(
+        lambda reasons: "Compliant" if reasons == "" else "Non-compliant"
+    )
 
+    # ✅ Step 7: Detect anomalies
+     anomaly_indices, anomaly_events = self.anomaly_detector.detect_anomalies(process_df, original_data)
 
-        return {
-      "original_data": original_data.to_dict(orient='records'),
-      "anomaly_count": anomaly_count,
-      "csv_output": self.csv_output,
-      "anomalies_json": anomalies_json
-}
+     if anomaly_events is not None and not anomaly_events.empty:
+        anomaly_count = len(anomaly_events)
+        anomalies_json = anomaly_events.to_dict(orient='records')
+        print("🚨 Anomalies Detected! Count:", anomaly_count)
+        print("🚨 Anomalies Detected! Saving and mitigating...")
+        print(anomaly_events[['EventName', 'Resources']].head())
+
+        # Create an in-memory CSV string for UI return
+        csv_buffer = io.StringIO()
+        anomaly_events.to_csv(csv_buffer, index=False)
+        self.csv_output = csv_buffer.getvalue()
+
+        # Mitigate anomalies
+        self.mitigate_anomalies(anomaly_events)
+        try:
+            save_anomalies_to_dynamodb(anomaly_events)
+            print("Anomalies saved to DynamoDB successfully.")
+        except Exception as e:
+            print("Failed to save anomalies to DynamoDB:", e)
+     else:
+        print("✅ No anomalies found.")
+        anomaly_count = 0
+        anomalies_json = []
+        self.csv_output = "No anomalies found.\n"
+
+     return {
+        "original_data": original_data.to_dict(orient='records'),
+        "anomaly_count": anomaly_count,
+        "csv_output": self.csv_output,
+        "anomalies_json": anomalies_json
+    }
