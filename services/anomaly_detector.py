@@ -53,7 +53,8 @@ class AnomalyDetector:
             "bootstrap": [False, True]
         }
         forest = IsolationForest(random_state=42)
-        grid_search = GridSearchCV(forest, param_grid, cv=3, scoring='accuracy', n_jobs=-1)
+        grid_search = GridSearchCV(forest, param_grid, cv=3, scoring='accuracy', n_jobs=-1, error_score=0)
+
         grid_search.fit(principal_components)
 
         # ✅ Step 5: Train Final Model with Best Parameters

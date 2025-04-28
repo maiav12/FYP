@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime
+from datetime import timezone
 from models.compliance import GDPRRequirements, NIS2Requirements
 
 class ComplianceChecker:
@@ -70,7 +71,7 @@ class ComplianceChecker:
                     "regulation": rule["regulation"],
                     "ruleId": rule["key"],
                     "message": rule["message"],
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
         return violations
 
